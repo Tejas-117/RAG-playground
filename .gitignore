@@ -1,0 +1,79 @@
+# ==========================================
+#  Python / Backend Specifications
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+wheels/
+*.spec
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# ==========================================
+#  Node / Package Managers (Global Wildcards)
+# ==========================================
+node_modules/
+.pnp/
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# ==========================================
+#  Next.js & Frontend Artifacts
+# ==========================================
+.next/
+out/
+build/
+dist/
+next-env.d.ts
+
+# ==========================================
+#  Testing & Quality Assurance
+# ==========================================
+coverage/
+.nyc_output/
+.pytest_cache/
+.tox/
+
+# ==========================================
+#  OS, IDE, & System Files
+# ==========================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.pem
+
+# ==========================================
+# Logging & Debug Output
+# ==========================================
+*debug.log*
+*error.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ==========================================
+#  Local Security & Credentials
+# ==========================================
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.env*
+
+# ==========================================
+#  Cloud Deployments & Tooling
+# ==========================================
+.vercel
+.serverless/
+*.tsbuildinfo

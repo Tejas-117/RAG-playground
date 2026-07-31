@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+:root {
+  --charcoal: #181616;
+  --white: #FFFFFF;
+  /* --golden-yellow: #FEBD59; */
+  
+  --light-gray: #80808036;
+  --tone-black: #5D5C5C;
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+  font-family: var(--font-inter);
+}
+
+html,
+body {
+  max-width: 100vw;
+  font-size: 16px;
+}
+
+body {
+  position: relative;
+}
+
+main {
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+button {
+  border: none;
+  cursor: pointer;
+}
