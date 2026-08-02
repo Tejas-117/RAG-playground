@@ -81,7 +81,10 @@ Out of scope: Auth, multi-user isolation, source-code ingestion, Graph/Hierarchi
 | **Testing** | Unit tests must be fast, deterministic, offline, and mocked (no real API calls/Chroma servers). Test boundary cases (empty docs, score ties, filter misses, invalid configs). Name tests `test_<behavior>`. |
 
 - For every function written, add comments explaining the parameters, return value, and a short description of function
+- For every block (if-else, loops, methods, classes.. etc.,) add comments explaining what it does.
 - Any frontend component/page/section, write a small description for it.
+- In the frontend, for all the hooks used, add explicit comments explaining the purpose.
+- In HTML/react for each of the top level UI blocks (max-depth 2), add a small description explaining what the block is.
 
 ## Development Commands
 
@@ -124,4 +127,3 @@ npm run lint
 4. Update documentation when commands, environment variables, API contracts,
    persisted schemas, defaults, or supported configuration options change.
 5. Report what was verified and call out any check that could not be run.
-

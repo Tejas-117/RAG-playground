@@ -3,20 +3,29 @@ name = "backend"
 version = "0.1.0"
 description = "Add your description here"
 authors = [
-    { name = "Tejas-117", email = "tejasftw117@gmail.com" }
+    { name = "Tejas", email = "" }
 ]
 requires-python = ">=3.10"
 dependencies = [
     "fastapi[standard]>=0.141.1",
+    "pymupdf>=1.28.0",
+    "python-docx>=1.2.0",
+    "python-pptx>=1.0.2",
 ]
 
 [project.scripts]
-backend = "src.app:main"
+backend = "backend.app:main"
 
 [build-system]
 requires = ["uv_build>=0.12.0,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = "src"
-module-root = ""
+module-name = "backend"
+module-root = "src"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.1",
+]

@@ -1,9 +1,14 @@
+from typing import Annotated
+
 from fastapi import APIRouter, File, UploadFile
 
 router = APIRouter()
 
+
 @router.post("/upload/")
-async def upload_files(files: list[UploadFile] = File(...)) -> dict[str, list[str]]:
+async def upload_files(
+    files: Annotated[list[UploadFile], File(...)],
+) -> dict[str, list[str]]:
     """Print and return the names of files received from the ingestion form.
 
     Args:

@@ -8,6 +8,7 @@ __pycache__/
 .eggs/
 wheels/
 *.spec
+*.ruff_cache
 
 # Virtual Environments
 .venv/
@@ -77,3 +78,5 @@ yarn-error.log*
 .vercel
 .serverless/
 *.tsbuildinfo
+
+others/

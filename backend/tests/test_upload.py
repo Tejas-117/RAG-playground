@@ -4,7 +4,7 @@ from io import BytesIO, StringIO
 
 from httpx import ASGITransport, AsyncClient
 
-from src.app import app
+from backend.app import app
 
 
 class UploadFilesTestCase(unittest.IsolatedAsyncioTestCase):

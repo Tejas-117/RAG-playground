@@ -34,7 +34,15 @@ Since you don't know what users will upload, your pipeline needs these automated
 Would you like recommendations on managed parsing APIs (like Unstructured.io, LlamaParse, or Azure Document Intelligence) that can handle all of these formats with a single endpoint, or are you planning to build the open-source parsing stack yourself?
 
 ------------------------------
+### The supported formats as of now
+* .pdf, .epub, .mobi -> pymupdf
+* .docx -> python-docx
+* .pptx -> python-pptx
+* .txt -> inbuilt function
+* .md -> inbuilt function
 
 ### The below formats will be supported later on
+* csv
+* xlsx
 * Configuration Files (.yaml, .toml, .ini): For users testing system prompt/log RAGs.
 * Web Formats (.html, .xml): Saved web pages or blog article downloads.

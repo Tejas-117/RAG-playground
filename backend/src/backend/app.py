@@ -2,7 +2,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.routers import upload
+from backend.routers import upload
 
 app = FastAPI(title="RAG Playground API")
 
@@ -22,4 +22,4 @@ def main() -> None:
     Returns:
         None. The function blocks while the development server is running.
     """
-    uvicorn.run("src.app:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("backend.app:app", host="127.0.0.1", port=8000, reload=True)
