@@ -3,11 +3,30 @@
 :root {
   --charcoal: #181616;
   --white: #FFFFFF;
-  /* --golden-yellow: #FEBD59; */
   
   --light-gray: #80808036;
   --tone-black: #5D5C5C;
+
   --landing-soft: #f7f7f6;
+  --muted-text: #7f7575;
+  --subtle-text: #474647;
+  --page-surface: #f9f9f8;
+  --grid-surface: #f5f6f7;
+  --panel-surface: #f3f4f3;
+  --hover-surface: #e8e8e7;
+  --border-subtle: #dadad9;
+  --border-strong: #d0c4c4;
+  --border-soft: #eeeeed;
+  --placeholder-text: #9b9393;
+  --primary-hover: #353232;
+  --badge-surface: #e2dfdf;
+  --toast-success-border: #b8c8ba;
+  --toast-success-surface: #f3faf4;
+  --toast-success-text: #244b2a;
+  --toast-error-border: #e2a9a4;
+  --toast-error-surface: #fff5f4;
+  --toast-error-text: #93000a;
+  --modal-backdrop: rgb(0 0 0 / 45%);
 }
 
 * {
@@ -45,9 +64,11 @@ button {
   --grid-glow-opacity: 0;
   --grid-pointer-x: -200px;
   --grid-pointer-y: -200px;
+  min-height: 100vh;
+  min-height: 100dvh;
   position: relative;
   isolation: isolate;
-  background-color: #f5f6f7;
+  background-color: var(--grid-surface);
   background-image:
     linear-gradient(rgba(93, 92, 92, 0.09) 1px, transparent 1px),
     linear-gradient(90deg, rgba(93, 92, 92, 0.09) 1px, transparent 1px);
@@ -59,8 +80,8 @@ button {
   inset: 0;
   z-index: -1;
   background-image:
-    linear-gradient(rgba(93, 92, 92, 0.28) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(93, 92, 92, 0.28) 1px, transparent 1px);
+    linear-gradient(rgba(93, 92, 92, 0.42) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(93, 92, 92, 0.42) 1px, transparent 1px);
   background-size: 28px 28px;
   content: "";
   opacity: var(--grid-glow-opacity);

@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Protocol
 
-from backend.ingestion.parser.models import ParsedDocument
+from backend.ingestion.parsers.models import ParsedDocument
 
 
 class DocumentParser(Protocol):

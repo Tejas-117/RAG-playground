@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backend.ingestion.parser import (
+from backend.ingestion.parsers import (
     DocxParser,
     MarkdownParser,
     ParserDependencyError,
@@ -19,29 +19,31 @@ from backend.ingestion.parser import (
 class ParserRegistryTestCase(unittest.TestCase):
     """Regression tests for ingestion parser selection and parser outputs."""
 
-    def test_registry_selects_parser_by_mime_type_before_extension(self) -> None:
-        """Verify MIME type has priority when upload metadata is available.
+    def test_registry_selects_parser_by_extension_despite_mime_like_name(
+        self,
+    ) -> None:
+        """Verify parser routing depends only on the filename extension.
 
         Returns:
             None. Assertions fail the test when parser selection changes.
         """
         registry = build_default_parser_registry()
 
-        parser = registry.get_parser(Path("notes.txt"), mime_type="application/pdf")
+        parser = registry.get_parser_by_extension(Path("application-pdf.txt"))
 
-        self.assertIsInstance(parser, PyMuPDFParser)
+        self.assertIsInstance(parser, PlainTextParser)
 
-    def test_registry_selects_parser_by_extension_when_mime_type_is_missing(
+    def test_registry_selects_parser_by_extension(
         self,
     ) -> None:
-        """Verify extension fallback selects a parser without upload MIME metadata.
+        """Verify extension routing selects a parser without upload metadata.
 
         Returns:
             None. Assertions fail the test when extension routing changes.
         """
         registry = build_default_parser_registry()
 
-        parser = registry.get_parser(Path("notes.md"))
+        parser = registry.get_parser_by_extension(Path("notes.md"))
 
         self.assertIsInstance(parser, MarkdownParser)
 
@@ -54,10 +56,18 @@ class ParserRegistryTestCase(unittest.TestCase):
         registry = build_default_parser_registry()
 
         # Check extension routing for the native Office parsers and PyMuPDF ebooks.
-        self.assertIsInstance(registry.get_parser(Path("report.docx")), DocxParser)
-        self.assertIsInstance(registry.get_parser(Path("slides.pptx")), PptxParser)
-        self.assertIsInstance(registry.get_parser(Path("book.epub")), PyMuPDFParser)
-        self.assertIsInstance(registry.get_parser(Path("book.mobi")), PyMuPDFParser)
+        self.assertIsInstance(
+            registry.get_parser_by_extension(Path("report.docx")), DocxParser
+        )
+        self.assertIsInstance(
+            registry.get_parser_by_extension(Path("slides.pptx")), PptxParser
+        )
+        self.assertIsInstance(
+            registry.get_parser_by_extension(Path("book.epub")), PyMuPDFParser
+        )
+        self.assertIsInstance(
+            registry.get_parser_by_extension(Path("book.mobi")), PyMuPDFParser
+        )
 
     def test_registry_raises_for_unsupported_file_type(self) -> None:
         """Verify unsupported uploads fail with a structured parser error.
@@ -68,7 +78,7 @@ class ParserRegistryTestCase(unittest.TestCase):
         registry = build_default_parser_registry()
 
         with self.assertRaises(UnsupportedFileTypeError):
-            registry.get_parser(Path("archive.zip"), mime_type="application/zip")
+            registry.get_parser_by_extension(Path("archive.zip"))
 
     def test_plain_text_parser_returns_normalized_document(self) -> None:
         """Verify plain text parsing returns the shared ParsedDocument model.

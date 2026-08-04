@@ -21,7 +21,7 @@ const navigationItems = [
  */
 export default function WorkbenchSidebar() {
   return (
-    <aside className="hidden min-h-screen flex-col justify-between border-r border-[#dadad9] bg-[#f3f4f3] px-3 py-6 lg:flex">
+    <aside className="hidden min-h-screen flex-col justify-between border-r border-[var(--border-subtle)] bg-[var(--panel-surface)] px-3 py-6 lg:flex">
       {/* Primary navigation identifies the active workbench area. */}
       <nav aria-label="Workbench navigation" className="space-y-1">
         {navigationItems.map((item) => {
@@ -32,8 +32,8 @@ export default function WorkbenchSidebar() {
               aria-current={item.active ? "page" : undefined}
               className={`flex items-center gap-3 rounded-sm px-3 py-2 text-sm font-medium transition-colors ${
                 item.active
-                  ? "bg-[#dadad9] text-[#181616]"
-                  : "text-[#5d5c5c] hover:bg-[#e8e8e7]"
+                  ? "bg-[var(--border-subtle)] text-[var(--charcoal)]"
+                  : "text-[var(--tone-black)] hover:bg-[var(--hover-surface)]"
               }`}
               href={item.active ? "/ingestion" : "#"}
               key={item.label}
@@ -47,7 +47,7 @@ export default function WorkbenchSidebar() {
 
       {/* Secondary navigation keeps support separate from core workflows. */}
       <a
-        className="flex items-center gap-2 px-3 text-xs font-medium text-[#5d5c5c] hover:text-[#181616]"
+        className="flex items-center gap-2 px-3 text-xs font-medium text-[var(--tone-black)] hover:text-[var(--charcoal)]"
         href="#"
       >
         <FiHelpCircle aria-hidden="true" className="size-4" />

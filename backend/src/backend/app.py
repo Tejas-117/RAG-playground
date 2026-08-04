@@ -2,18 +2,19 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.routers import upload
+from backend.api.routers import corpora, uploads
 
 app = FastAPI(title="RAG Playground API")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_methods=["POST"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
-app.include_router(upload.router)
+app.include_router(uploads.router)
+app.include_router(corpora.router)
 
 
 def main() -> None:

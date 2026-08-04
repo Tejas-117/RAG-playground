@@ -2,8 +2,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from backend.ingestion.parser.errors import ParserDependencyError
-from backend.ingestion.parser.models import ParsedBlock, ParsedDocument, ParsedPage
+from backend.ingestion.parsers.errors import ParserDependencyError
+from backend.ingestion.parsers.models import ParsedBlock, ParsedDocument, ParsedPage
 
 
 class DocxParser:

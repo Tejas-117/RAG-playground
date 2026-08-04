@@ -1,21 +1,17 @@
 class UnsupportedFileTypeError(ValueError):
     """Raised when ingestion cannot find a parser for an uploaded file type."""
 
-    def __init__(self, mime_type: str | None, extension: str) -> None:
+    def __init__(self, extension: str) -> None:
         """Build an unsupported file type error with detection details.
 
         Args:
-            mime_type: MIME type reported by upload handling or guessed locally.
             extension: Lowercase file extension from the uploaded path.
 
         Returns:
             None. The initialized exception carries a user-readable message.
         """
-        self.mime_type = mime_type
         self.extension = extension
-        super().__init__(
-            f"No parser registered for mime_type={mime_type!r}, extension={extension!r}"
-        )
+        super().__init__(f"No parser registered for extension={extension!r}")
 
 
 class ParserDependencyError(RuntimeError):

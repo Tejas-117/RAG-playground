@@ -1,7 +1,7 @@
 from importlib import metadata
 from pathlib import Path
 
-from backend.ingestion.parser.models import ParsedDocument
+from backend.ingestion.parsers.models import ParsedDocument
 
 
 class PlainTextParser:

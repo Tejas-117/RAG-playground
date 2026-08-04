@@ -80,3 +80,5 @@ yarn-error.log*
 *.tsbuildinfo
 
 others/
+uploads/
+backend/*.sqlite3

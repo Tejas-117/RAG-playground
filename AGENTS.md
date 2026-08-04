@@ -82,8 +82,9 @@ Out of scope: Auth, multi-user isolation, source-code ingestion, Graph/Hierarchi
 
 - For every function written, add comments explaining the parameters, return value, and a short description of function
 - For every block (if-else, loops, methods, classes.. etc.,) add comments explaining what it does.
-- Any frontend component/page/section, write a small description for it.
-- In the frontend, for all the hooks used, add explicit comments explaining the purpose.
+- Any frontend component/section, write a small description for it.
+- In the frontend, for all the hooks used, add explicit comments explaining the purpose. If there are multiple variables defined one below the
+  other, with the comments for each one add a line break between 2 variables for readability.
 - In HTML/react for each of the top level UI blocks (max-depth 2), add a small description explaining what the block is.
 
 ## Development Commands
@@ -103,27 +104,17 @@ npm run lint
 ## Testing Requirements
 
 - Add or update tests with every behavior change.
-- Name Python test files `test_<feature>.py` and test functions
-  `test_<expected_behavior>`.
-- Unit tests must not call paid APIs, download models, require a running
-  ChromaDB server, or depend on execution order.
-- Use small fixed embeddings or fakes to test ranking and metric behavior.
-  Include edge cases such as empty documents, overlap boundaries, tied scores,
-  filters with no matches, provider failures, and invalid configurations.
+- Name Python test files `test_<feature>.py` and test functions `test_<expected_behavior>`.
+- Unit tests must not call paid APIs, download models, require a running ChromaDB server, or depend on execution order.
+- Use small fixed embeddings or fakes to test ranking and metric behavior. Include edge cases such as empty documents, overlap boundaries, tied scores, filters with no matches, provider failures, and invalid configurations.
 - Add API tests for validation and structured error responses.
-- For frontend changes, run lint. Add focused component or
-  end-to-end tests once a test framework is configured.
-- Mark integration tests explicitly and document their required services,
-  models, environment variables, and expected cost.
+- For frontend changes, run lint. Add focused component or end-to-end tests once a test framework is configured.
+- Mark integration tests explicitly and document their required services, models, environment variables, and expected cost.
 
 ## Change Workflow
 
-1. Inspect the affected application, its local configuration, and relevant
-   documentation before editing.
-2. Make the smallest coherent change and preserve separation between domain
-   logic, adapters, API transport, and UI.
-3. Add regression coverage and run the narrowest relevant checks, followed by
-   the application-level checks when practical.
-4. Update documentation when commands, environment variables, API contracts,
-   persisted schemas, defaults, or supported configuration options change.
+1. Inspect the affected application, its local configuration, and relevant documentation before editing.
+2. Make the smallest coherent change and preserve separation between domain logic, adapters, API transport, and UI.
+3. Add regression coverage and run the narrowest relevant checks, followed by the application-level checks when practical.
+4. Update documentation when commands, environment variables, API contracts, persisted schemas, defaults, or supported configuration options change.
 5. Report what was verified and call out any check that could not be run.
