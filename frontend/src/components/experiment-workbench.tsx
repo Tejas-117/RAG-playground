@@ -1,7 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { FiAlertCircle, FiCheck, FiPlay, FiRefreshCw, FiSearch } from "react-icons/fi";
+import {
+  FiAlertCircle,
+  FiCheck,
+  FiPlay,
+  FiRefreshCw,
+  FiSearch,
+  FiX,
+} from "react-icons/fi";
 import ExperimentInputControl, {
   type ExperimentInputMode,
 } from "@/components/experiment-input-control";
@@ -11,12 +18,17 @@ import SelectControl from "@/components/select-control";
 import Toast from "@/components/toast";
 import WorkbenchGridCanvas from "@/components/workbench-grid-canvas";
 import WorkbenchSidebar from "@/components/workbench-sidebar";
-import apiClient, { isCancel } from "@/lib/axios";
+import apiClient, { isAxiosError, isCancel } from "@/lib/axios";
 import { type CorpusOption, parseCorpora } from "@/validation/corpora";
 import {
   type PipelineOptions,
   parsePipelineOptions,
 } from "@/validation/pipeline-options";
+import {
+  parseRunApiError,
+  parseRunResponse,
+  runCreateRequestSchema,
+} from "@/validation/runs";
 
 /** The ordered stages shown in the experiment pipeline rail. */
 const experimentStages = [
@@ -43,6 +55,12 @@ type ExperimentConfiguration = {
   maxOutputTokens: string;
   retrievalMetrics: string[];
   answerMetrics: string[];
+};
+
+/** A dismissible outcome produced while validating or persisting a run. */
+type RunNotice = {
+  message: string;
+  type: "success" | "error";
 };
 
 /**
@@ -119,14 +137,17 @@ export default function ExperimentWorkbench() {
   // Stores a readable loading or contract-validation failure.
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Stores the reason a run cannot start after the user presses the unavailable action.
-  const [runNotice, setRunNotice] = useState<string | null>(null);
+  // Stores the latest run validation, persistence, or success notice.
+  const [runNotice, setRunNotice] = useState<RunNotice | null>(null);
 
   // Increments when the user asks to retry both initial API requests.
   const [loadAttempt, setLoadAttempt] = useState(0);
 
   // Stores each configuration card so the stage rail can move focus to it.
   const stageSectionRefs = useRef<Record<string, HTMLElement | null>>({});
+
+  // Stores the corpus search input so the clear action can preserve keyboard focus.
+  const corpusSearchInputRef = useRef<HTMLInputElement | null>(null);
 
   // Loads the backend catalog and current corpus inventory whenever a retry is requested.
   useEffect(() => {
@@ -397,34 +418,136 @@ export default function ExperimentWorkbench() {
   }
 
   /**
-   * Explains missing run requirements when the primary action is unavailable.
+   * Validates and persists one configured single-question run.
    *
-   * @returns Nothing. A readable notice is shown when a required value is missing.
+   * @returns A promise resolved after success or failure feedback is displayed.
    */
-  function handleRunExperiment(): void {
+  async function handleRunExperiment(): Promise<void> {
     // Wait for the configuration catalog before allowing a run to proceed.
     if (!configuration) {
-      setRunNotice("Wait for the pipeline configuration to finish loading.");
+      setRunNotice({
+        message: "Wait for the pipeline configuration to finish loading.",
+        type: "error",
+      });
       return;
     }
 
     // Require one immutable corpus as the source for the experiment.
     if (!selectedCorpusId) {
-      setRunNotice("Select a corpus before running the experiment.");
+      setRunNotice({
+        message: "Select a corpus before running the experiment.",
+        type: "error",
+      });
       return;
     }
 
     // Require the input selected by the user for this experiment.
     if (!hasRunInput) {
-      setRunNotice(
-        inputMode === "question"
-          ? "Enter a question before running the experiment."
-          : "Choose an evaluation dataset before running the experiment.",
-      );
+      setRunNotice({
+        message:
+          inputMode === "question"
+            ? "Enter a question before running the experiment."
+            : "Choose an evaluation dataset before running the experiment.",
+        type: "error",
+      });
+      return;
+    }
+
+    // Preserve the existing dataset behavior until a batch-runs endpoint is implemented.
+    if (inputMode !== "question") {
+      setRunNotice(null);
+      return;
+    }
+
+    const requestResult = runCreateRequestSchema.safeParse({
+      corpus_id: selectedCorpusId,
+      question,
+      configuration: {
+        chunking: {
+          strategy: configuration.chunkingStrategy,
+          chunk_size_tokens: Number(configuration.chunkSizeTokens),
+          chunk_overlap_tokens: Number(configuration.chunkOverlapTokens),
+        },
+        embedding: {
+          provider: configuration.embeddingProvider,
+          model: configuration.embeddingModel,
+          distance_metric: configuration.distanceMetric,
+        },
+        retrieval: {
+          top_k: Number(configuration.topK),
+        },
+        generation: {
+          provider: configuration.generationProvider,
+          model: configuration.generationModel,
+          temperature: Number(configuration.temperature),
+          max_output_tokens: Number(configuration.maxOutputTokens),
+        },
+        evaluation: {
+          retrieval_metrics: configuration.retrievalMetrics,
+          answer_metrics: configuration.answerMetrics,
+        },
+      },
+    });
+
+    // Reject incomplete or invalid numeric controls before sending an unusable payload.
+    if (!requestResult.success) {
+      setRunNotice({
+        message: "Review the numeric experiment settings before saving this run.",
+        type: "error",
+      });
       return;
     }
 
     setRunNotice(null);
+
+    try {
+      const response = await apiClient.post<unknown>("/runs", requestResult.data);
+      const persistedRun = parseRunResponse(response.data);
+
+      setRunNotice({
+        message: `Run ${persistedRun.id} was saved.`,
+        type: "success",
+      });
+    } catch (error) {
+      // Prefer stable API messages while retaining a safe fallback for transport failures.
+      const apiMessage = isAxiosError(error)
+        ? parseRunApiError(error.response?.data)
+        : null;
+
+      setRunNotice({
+        message: apiMessage ??
+          (error instanceof Error
+            ? error.message
+            : "The experiment run could not be saved."),
+        type: "error",
+      });
+    }
+  }
+
+  /**
+   * Updates the corpus query and invalidates any previously selected corpus.
+   *
+   * @param value - Current text entered into the corpus search field.
+   * @returns Nothing. Search, selection, and dropdown state are updated in place.
+   */
+  function updateCorpusSearch(value: string): void {
+    // A typed query is not a valid corpus selection until a result is chosen.
+    setCorpusSearch(value);
+    setSelectedCorpusId("");
+    setIsCorpusDropdownOpen(true);
+  }
+
+  /**
+   * Clears the corpus query and its selected stable identifier.
+   *
+   * @returns Nothing. The empty source picker remains focused and open.
+   */
+  function clearCorpusSearch(): void {
+    // Clear both values so run readiness cannot retain a hidden corpus selection.
+    setCorpusSearch("");
+    setSelectedCorpusId("");
+    setIsCorpusDropdownOpen(true);
+    corpusSearchInputRef.current?.focus();
   }
 
   return (
@@ -668,8 +791,10 @@ export default function ExperimentWorkbench() {
 
                       {/* The source search keeps results attached to the input. */}
                       <div className="relative mt-5">
-                        <label className="relative block">
-                          <span className="sr-only">Search uploaded corpora</span>
+                        <div className="relative">
+                          <label className="sr-only" htmlFor="corpus-search">
+                            Search uploaded corpora
+                          </label>
                           <FiSearch
                             aria-hidden="true"
                             className={`
@@ -683,7 +808,7 @@ export default function ExperimentWorkbench() {
                             aria-haspopup="listbox"
                             className={`
                               w-full rounded border border-[var(--border-subtle)]
-                              bg-[var(--page-surface)] py-2.5 pl-9 pr-3 text-sm
+                              bg-[var(--page-surface)] py-2.5 pl-9 pr-10 text-sm
                               outline-none transition-colors
                               placeholder:text-[var(--placeholder-text)]
                               focus:border-[var(--charcoal)] focus:ring-1
@@ -691,24 +816,43 @@ export default function ExperimentWorkbench() {
                               disabled:opacity-60
                             `}
                             disabled={corpora.length === 0}
+                            id="corpus-search"
                             onBlur={() =>
                               window.setTimeout(() => setIsCorpusDropdownOpen(false), 0)
                             }
-                            onChange={(event) => {
-                              setCorpusSearch(event.target.value);
-                              setIsCorpusDropdownOpen(true);
-                            }}
+                            onChange={(event) => updateCorpusSearch(event.target.value)}
                             onFocus={() => setIsCorpusDropdownOpen(true)}
                             placeholder={
                               corpora.length === 0
                                 ? "Upload a corpus before running an experiment"
                                 : "Search uploaded corpora"
                             }
+                            ref={corpusSearchInputRef}
                             role="combobox"
-                            type="search"
+                            type="text"
                             value={corpusSearch}
                           />
-                        </label>
+                          {/* Action to clear the input */}
+                          {corpusSearch ? (
+                            <button
+                              aria-label="Clear corpus selection"
+                              className={`
+                                absolute right-2 top-1/2 flex size-7
+                                -translate-y-1/2 cursor-pointer items-center
+                                justify-center rounded text-[var(--muted-text)]
+                                transition-colors hover:bg-[var(--landing-soft)]
+                                hover:text-[var(--charcoal)]
+                                focus-visible:outline-none focus-visible:ring-2
+                                focus-visible:ring-[var(--charcoal)]
+                              `}
+                              onClick={clearCorpusSearch}
+                              onMouseDown={(event) => event.preventDefault()}
+                              type="button"
+                            >
+                              <FiX aria-hidden="true" className="size-4" />
+                            </button>
+                          ) : null}
+                        </div>
 
                         {/* Search results list only real corpus IDs returned by FastAPI. */}
                         {isCorpusDropdownOpen ? (
@@ -1081,7 +1225,7 @@ export default function ExperimentWorkbench() {
                     question={question}
                   />
 
-                  {/* The footer clarifies that this pass configures rather than executes a run. */}
+                  {/* The footer distinguishes saved run history from future execution. */}
                   <div
                     className={`
                       flex flex-col items-start justify-between gap-4 border-t
@@ -1089,8 +1233,8 @@ export default function ExperimentWorkbench() {
                     `}
                   >
                     <p className="max-w-md text-xs leading-5 text-[var(--muted-text)]">
-                      Options and defaults come from the backend. Run persistence and execution will
-                      connect in the next pass.
+                      Saving keeps this exact question and configuration for future pipeline
+                      execution.
                     </p>
                     <button
                       aria-disabled={!isRunReady}
@@ -1117,9 +1261,13 @@ export default function ExperimentWorkbench() {
         </div>
       </WorkbenchGridCanvas>
 
-      {/* The run notice explains why an unavailable action cannot proceed. */}
+      {/* The run notice reports validation and persistence outcomes. */}
       {runNotice ? (
-        <Toast message={runNotice} onDismiss={() => setRunNotice(null)} type="error" />
+        <Toast
+          message={runNotice.message}
+          onDismiss={() => setRunNotice(null)}
+          type={runNotice.type}
+        />
       ) : null}
     </main>
   );

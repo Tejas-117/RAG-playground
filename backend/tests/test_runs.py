@@ -143,6 +143,61 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row[0], "What is the refund policy?")
         self.assertEqual(json.loads(row[1]), response_data["configuration"])
 
+    async def test_create_run_saves_complete_frontend_configuration(self) -> None:
+        """Verify the complete frontend payload is persisted as the run snapshot.
+
+        Args:
+            None.
+
+        Returns:
+            None. Assertions verify the response and database contain the UI selections.
+        """
+        payload = {
+            "corpus_id": "corpus-1",
+            "question": "How long do refunds take?",
+            "configuration": {
+                "chunking": {
+                    "strategy": "recursive",
+                    "chunk_size_tokens": 800,
+                    "chunk_overlap_tokens": 100,
+                },
+                "embedding": {
+                    "provider": "ollama",
+                    "model": "all-minilm",
+                    "distance_metric": "cosine",
+                },
+                "retrieval": {"top_k": 10},
+                "generation": {
+                    "provider": "ollama",
+                    "model": "llama3.2:3b",
+                    "temperature": 0.2,
+                    "max_output_tokens": 1000,
+                },
+                "evaluation": {
+                    "retrieval_metrics": [],
+                    "answer_metrics": ["groundedness", "answer_relevance"],
+                },
+            },
+        }
+
+        response = await self._post_run(payload)
+
+        # Verify FastAPI accepted and returned every selection submitted by the UI.
+        self.assertEqual(response.status_code, 201)
+        response_data = response.json()
+        self.assertEqual(response_data["configuration"], payload["configuration"])
+
+        with sqlite3.connect(self.database_path) as connection:
+            stored_row = connection.execute(
+                "SELECT corpus_id, question, effective_config_json FROM pipeline_run"
+            ).fetchone()
+
+        # Confirm the immutable SQLite row matches the selected source, question, and config.
+        self.assertIsNotNone(stored_row)
+        self.assertEqual(stored_row[0], payload["corpus_id"])
+        self.assertEqual(stored_row[1], payload["question"])
+        self.assertEqual(json.loads(stored_row[2]), payload["configuration"])
+
     async def test_create_run_rejects_blank_question(self) -> None:
         """Verify whitespace-only questions produce a structured validation error.
 
