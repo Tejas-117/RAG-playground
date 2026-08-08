@@ -32,8 +32,14 @@ def test_schema_creates_corpus_and_document_tables() -> None:
         )
     }
 
-    # Verify the simplified persistence boundary before later tables are added.
-    assert {"corpus", "document"}.issubset(table_names)
+    # Verify source, reusable chunking-artifact, and immutable run tables exist.
+    assert {
+        "corpus",
+        "document",
+        "chunk_set",
+        "chunk",
+        "pipeline_run",
+    }.issubset(table_names)
     assert not {"corpus_version", "corpus_version_document"}.intersection(table_names)
 
 
@@ -109,3 +115,197 @@ def test_schema_assigns_documents_to_corpora() -> None:
 
     # Assert separate uploads create independent corpus document collections.
     assert corpus_documents == [("corpus-1", 1), ("corpus-2", 1)]
+
+
+def test_schema_records_chunk_set_provenance_and_chunks() -> None:
+    """Verify that chunks retain their chunk-set and source-document provenance.
+
+    Parameters:
+        None.
+    Returns:
+        None. Assertions verify the chunking artifact relationships and constraints.
+    """
+    # Create an isolated database with the same foreign-key enforcement as the app.
+    connection = sqlite3.connect(":memory:")
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    # Insert the immutable corpus and source document required by a chunk set.
+    connection.execute(
+        "INSERT INTO corpus VALUES (?, ?, ?, ?, ?)",
+        (
+            "corpus-1",
+            "Product docs",
+            None,
+            "2026-08-02T00:00:00Z",
+            "2026-08-02T00:00:00Z",
+        ),
+    )
+    connection.execute(
+        "INSERT INTO document VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "document-1",
+            "corpus-1",
+            "guide.pdf",
+            "data/documents/guide.pdf",
+            "application/pdf",
+            128,
+            "a" * 64,
+            "2026-08-02T00:00:00Z",
+        ),
+    )
+
+    # Record the exact chunking artifact configuration and build result.
+    connection.execute(
+        """
+        INSERT INTO chunk_set (
+            id, corpus_id, fingerprint, chunking_config_json, chunker_name,
+            chunker_version, status, chunk_count, created_at, started_at,
+            completed_at, duration_ms, error_code, error_details_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "chunk-set-1",
+            "corpus-1",
+            "chunk-fingerprint-1",
+            '{"strategy":"recursive","chunk_size_tokens":800,"chunk_overlap_tokens":100}',
+            "recursive",
+            "1.0.0",
+            "ready",
+            1,
+            "2026-08-02T00:00:00Z",
+            "2026-08-02T00:00:01Z",
+            "2026-08-02T00:00:02Z",
+            1000,
+            None,
+            None,
+        ),
+    )
+
+    # Store the chunk text and offsets that downstream retrieval will reference.
+    connection.execute(
+        """
+        INSERT INTO chunk (
+            id, chunk_set_id, source_document_id, ordinal, text,
+            character_start_offset, character_end_offset, token_start_offset,
+            token_end_offset, page_start, page_end, section_path_json,
+            source_metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "chunk-1",
+            "chunk-set-1",
+            "document-1",
+            0,
+            "Product overview",
+            0,
+            16,
+            0,
+            2,
+            1,
+            1,
+            '["Overview"]',
+            '{"parser":"pdf"}',
+        ),
+    )
+
+    # Read the persisted chunk payload and its source document as an execution would.
+    persisted_chunk = connection.execute(
+        """
+        SELECT text, source_document_id
+        FROM chunk
+        WHERE id = ?
+        """,
+        ("chunk-1",),
+    ).fetchone()
+
+    # Confirm the chunk retains both text and source-document provenance.
+    assert persisted_chunk == ("Product overview", "document-1")
+
+    # Reject a second chunk with the same source-document ordinal in one chunk set.
+    try:
+        connection.execute(
+            """
+            INSERT INTO chunk (
+                id, chunk_set_id, source_document_id, ordinal, text,
+                source_metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("chunk-duplicate", "chunk-set-1", "document-1", 0, "Duplicate", "{}"),
+        )
+    except sqlite3.IntegrityError:
+        # The uniqueness constraint prevents ambiguous chunk ordering.
+        pass
+    else:
+        # Fail explicitly if SQLite accepts an ambiguous chunk ordinal.
+        raise AssertionError("chunk ordinals must be unique per source document")
+
+
+def test_schema_records_single_question_pipeline_runs() -> None:
+    """Verify that a run retains its corpus, question, and configuration snapshot.
+
+    Parameters:
+        None.
+    Returns:
+        None. Assertions verify run persistence and integrity constraints.
+    """
+    # Create an isolated database with production-equivalent foreign-key enforcement.
+    connection = sqlite3.connect(":memory:")
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    # Insert the immutable corpus required by the run foreign key.
+    connection.execute(
+        "INSERT INTO corpus VALUES (?, ?, ?, ?, ?)",
+        (
+            "corpus-1",
+            "Product docs",
+            None,
+            "2026-08-02T00:00:00Z",
+            "2026-08-02T00:00:00Z",
+        ),
+    )
+
+    # Persist a representative question and valid JSON configuration snapshot.
+    connection.execute(
+        "INSERT INTO pipeline_run VALUES (?, ?, ?, ?, ?)",
+        (
+            "run-1",
+            "corpus-1",
+            "What is the refund policy?",
+            '{"retrieval":{"top_k":10}}',
+            "2026-08-02T00:00:01Z",
+        ),
+    )
+    persisted_run = connection.execute(
+        "SELECT corpus_id, question, effective_config_json FROM pipeline_run"
+    ).fetchone()
+
+    # Confirm the run retains the complete immutable input required by later stages.
+    assert persisted_run == (
+        "corpus-1",
+        "What is the refund policy?",
+        '{"retrieval":{"top_k":10}}',
+    )
+
+    # Exercise invalid inputs independently so both schema constraints are verified.
+    invalid_runs = [
+        ("run-blank", "corpus-1", "   ", "{}", "2026-08-02T00:00:02Z"),
+        ("run-json", "corpus-1", "Question", "invalid", "2026-08-02T00:00:03Z"),
+    ]
+
+    # Reject blank questions and malformed configuration snapshots at persistence time.
+    for invalid_run in invalid_runs:
+        try:
+            connection.execute(
+                "INSERT INTO pipeline_run VALUES (?, ?, ?, ?, ?)",
+                invalid_run,
+            )
+        except sqlite3.IntegrityError:
+            # The expected integrity failure proves the corresponding check is active.
+            pass
+        else:
+            # Fail explicitly if SQLite accepts an unusable run record.
+            raise AssertionError(
+                "pipeline runs require a question and valid JSON config"
+            )

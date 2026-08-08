@@ -82,10 +82,13 @@ Out of scope: Auth, multi-user isolation, source-code ingestion, Graph/Hierarchi
 
 - For every function written, add comments explaining the parameters, return value, and a short description of function
 - For every block (if-else, loops, methods, classes.. etc.,) add comments explaining what it does.
-- Any frontend component/section, write a small description for it.
-- In the frontend, for all the hooks used, add explicit comments explaining the purpose. If there are multiple variables defined one below the
+
+The below instructions are specifically for the frontend/ folder.
+- Any component/section, write a small description for it.
+- For all the hooks used, add explicit comments explaining the purpose. If there are multiple variables defined one below the
   other, with the comments for each one add a line break between 2 variables for readability.
-- In HTML/react for each of the top level UI blocks (max-depth 2), add a small description explaining what the block is.
+- For each of the top level UI blocks (max-depth 4), add a small description explaining what the block is.
+- Do not exceed 100 characters per line, if yes continue in next line each element structure should be opening tag, content, closing tag.. each on different line
 
 ## Development Commands
 
@@ -117,4 +120,5 @@ npm run lint
 2. Make the smallest coherent change and preserve separation between domain logic, adapters, API transport, and UI.
 3. Add regression coverage and run the narrowest relevant checks, followed by the application-level checks when practical.
 4. Update documentation when commands, environment variables, API contracts, persisted schemas, defaults, or supported configuration options change.
-5. Report what was verified and call out any check that could not be run.
+5. Report the changes made tagging the files that were added/edited for that change.
+6. Report what was verified and call out any check that could not be run.

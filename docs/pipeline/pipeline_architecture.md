@@ -263,6 +263,22 @@ It may be saved and named, such as “Baseline Recursive”.
 
 A run records the exact effective configuration used for an execution. Named editable configurations are useful for UX, but they are not necessary for cache correctness; caching uses the effective configuration snapshot and stage fingerprints.
 
+The first backend run slice supports a single ad hoc question. `POST /runs`
+validates the selected immutable corpus and backend-supported configuration,
+then stores the trimmed question and resolved configuration snapshot in
+`pipeline_run`. It does not execute pipeline stages yet. The question is stored
+on the run—not on the corpus or chunk set—because it is a query-specific input.
+
+The effective configuration includes ordered `retrieval_metrics` and
+`answer_metrics` lists. Both lists may be empty to skip evaluation. A
+single-question run may select groundedness and answer relevance together, but
+cannot select retrieval metrics or answer correctness because it has no labelled
+relevant documents or reference answer.
+
+Evaluation datasets remain separate and are not represented in the current run
+schema. When they are implemented, they will use stable evaluation-example
+records rather than overloading the single `question` field.
+
 ### Fingerprint-based reuse
 
 The backend should calculate a deterministic fingerprint for every reusable stage:
@@ -307,7 +323,6 @@ corpora
 documents
 parsed_documents
 chunk_sets
-chunk_set_sources
 chunks
 vector_indexes
 experiments or pipeline_configs
@@ -341,7 +356,9 @@ runs
   -> evaluation result
 ```
 
-`chunk_set_sources` records the exact parsed-document artifacts that contributed to a chunk set; it is needed because a corpus contains multiple documents.
+Because a corpus is immutable and a chunk set processes all of its documents,
+`chunk_set.corpus_id` identifies the complete input set. Each `chunk` retains
+its own `source_document_id` for per-chunk provenance.
 
 Artifact-like tables should generally contain:
 

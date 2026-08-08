@@ -1,18 +1,12 @@
 "use client";
 
-import axios from "axios";
 import { useEffect, useRef, useState } from "react";
-import {
-  FiChevronDown,
-  FiFileText,
-  FiFolder,
-  FiPlus,
-  FiRefreshCw,
-  FiX,
-} from "react-icons/fi";
+import { FiChevronDown, FiFileText, FiFolder, FiPlus, FiRefreshCw, FiX } from "react-icons/fi";
 import Toast, { ToastType } from "@/components/toast";
 import UploadForm from "@/components/upload-form";
+import WorkbenchGridCanvas from "@/components/workbench-grid-canvas";
 import WorkbenchSidebar from "@/components/workbench-sidebar";
+import apiClient, { isAxiosError } from "@/lib/axios";
 
 type Corpus = {
   id: string;
@@ -51,21 +45,6 @@ type Notice = {
   type: ToastType;
   message: string;
 };
-
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
-
-/**
- * Resolves the API origin configured for the browser bundle.
- *
- * @returns The configured API base URL.
- */
-function getApiBaseUrl(): string {
-  if (!apiBaseUrl) {
-    throw new Error("NEXT_PUBLIC_API_BASE_URL is not configured.");
-  }
-
-  return apiBaseUrl;
-}
 
 /**
  * Converts the backend response into the camelCase model used by the UI.
@@ -154,9 +133,6 @@ export default function IngestionWorkbench() {
   // Holds the latest success or failure message shown to the user.
   const [notice, setNotice] = useState<Notice | null>(null);
 
-  // Keeps the grid canvas available to the pointer-tracking effect without causing renders.
-  const gridBackgroundRef = useRef<HTMLElement>(null);
-
   // Keeps the upload dialog's close control available for focus management.
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -170,12 +146,10 @@ export default function IngestionWorkbench() {
     setCorporaError(null);
 
     try {
-      const response = await axios.get<CorporaResponse>(
-        `${getApiBaseUrl()}/corpora/`,
-      );
+      const response = await apiClient.get<CorporaResponse>("/corpora/");
       setCorpora(normalizeCorpora(response.data));
     } catch (error) {
-      const message = axios.isAxiosError(error)
+      const message = isAxiosError(error)
         ? "The uploaded corpus details could not be loaded."
         : error instanceof Error
           ? error.message
@@ -191,85 +165,6 @@ export default function IngestionWorkbench() {
     const loadTimeoutId = window.setTimeout(() => void fetchCorpora(), 0);
 
     return () => window.clearTimeout(loadTimeoutId);
-  }, []);
-
-  // Subscribes to pointer movement so the grid glow follows the cursor.
-  useEffect(() => {
-    const gridBackground = gridBackgroundRef.current;
-    const hasFinePointer = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
-
-    if (gridBackground === null || !hasFinePointer) {
-      return;
-    }
-
-    // Capturing the narrowed element in a dedicated constant keeps it non-null in callbacks.
-    const gridElement: HTMLElement = gridBackground;
-
-    let animationFrameId: number | null = null;
-    let nextPointerPosition: { x: number; y: number } | null = null;
-
-    /**
-     * Applies the latest pointer position to the grid glow on the next animation frame.
-     *
-     * @returns Nothing. The grid CSS variables are updated directly on the canvas.
-     */
-    function paintGridGlow(): void {
-      animationFrameId = null;
-
-      if (!nextPointerPosition) {
-        return;
-      }
-
-      gridElement.style.setProperty(
-        "--grid-pointer-x",
-        `${nextPointerPosition.x}px`,
-      );
-      gridElement.style.setProperty(
-        "--grid-pointer-y",
-        `${nextPointerPosition.y}px`,
-      );
-      nextPointerPosition = null;
-    }
-
-    /**
-     * Tracks the cursor relative to the grid canvas for the local highlight.
-     *
-     * @param event - The pointer movement reported by the browser.
-     * @returns Nothing. The latest pointer coordinates are queued for painting.
-     */
-    function handleGridPointerMove(event: PointerEvent): void {
-      const bounds = gridElement.getBoundingClientRect();
-      nextPointerPosition = {
-        x: event.clientX - bounds.left,
-        y: event.clientY - bounds.top,
-      };
-      gridElement.style.setProperty("--grid-glow-opacity", "1");
-
-      if (animationFrameId === null) {
-        animationFrameId = window.requestAnimationFrame(paintGridGlow);
-      }
-    }
-
-    /**
-     * Fades the grid highlight after the pointer leaves the canvas.
-     *
-     * @returns Nothing. The glow opacity is reset through a CSS variable.
-     */
-    function handleGridPointerLeave(): void {
-      gridElement.style.setProperty("--grid-glow-opacity", "0");
-    }
-
-    gridElement.addEventListener("pointermove", handleGridPointerMove);
-    gridElement.addEventListener("pointerleave", handleGridPointerLeave);
-
-    return () => {
-      gridElement.removeEventListener("pointermove", handleGridPointerMove);
-      gridElement.removeEventListener("pointerleave", handleGridPointerLeave);
-
-      if (animationFrameId !== null) {
-        window.cancelAnimationFrame(animationFrameId);
-      }
-    };
   }, []);
 
   // Locks page scrolling, focuses the dialog, and handles Escape while the modal is open.
@@ -338,10 +233,7 @@ export default function IngestionWorkbench() {
    * @param requestedName - Corpus name entered before upload.
    * @returns A promise resolved after the inventory refresh is requested.
    */
-  async function handleUploadSuccess(
-    filenames: string[],
-    requestedName: string,
-  ): Promise<void> {
+  async function handleUploadSuccess(filenames: string[], requestedName: string): Promise<void> {
     setIsModalOpen(false);
     setNotice({
       type: "success",
@@ -368,9 +260,7 @@ export default function IngestionWorkbench() {
    * @returns Nothing. The expanded corpus state is updated.
    */
   function toggleCorpus(corpusId: string): void {
-    setExpandedCorpusId((currentId) =>
-      currentId === corpusId ? null : corpusId,
-    );
+    setExpandedCorpusId((currentId) => (currentId === corpusId ? null : corpusId));
   }
 
   return (
@@ -378,19 +268,14 @@ export default function IngestionWorkbench() {
       <WorkbenchSidebar />
 
       {/* Main grid canvas contains the corpus inventory and its primary action. */}
-      <section
-        className="ingestion-grid-background min-w-0 px-5 py-8 sm:px-8 lg:px-12"
-        ref={gridBackgroundRef}
-      >
+      <WorkbenchGridCanvas className="px-5 py-8 sm:px-8 lg:px-12">
         <div className="mx-auto w-full max-w-5xl">
           <header className="mb-6 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <p className="mb-2 font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-[var(--muted-text)] lg:hidden">
                 RAG Playground / Documents
               </p>
-              <h1 className="text-2xl font-bold tracking-[-0.03em]">
-                Uploaded Corpora
-              </h1>
+              <h1 className="text-2xl font-bold tracking-[-0.03em]">Uploaded Corpora</h1>
               <p className="mt-1 text-sm text-[var(--tone-black)]">
                 Manage knowledge bases and their uploaded documents.
               </p>
@@ -489,12 +374,13 @@ export default function IngestionWorkbench() {
                     type="button"
                   >
                     <span className="flex min-w-0 items-center gap-3 px-4 py-4 sm:px-6">
-                      <FiFolder aria-hidden="true" className="size-5 shrink-0 text-[var(--muted-text)]" />
+                      <FiFolder
+                        aria-hidden="true"
+                        className="size-5 shrink-0 text-[var(--muted-text)]"
+                      />
                       <span className="min-w-0">
                         <span className="flex items-center gap-2">
-                          <span className="truncate text-sm font-bold">
-                            {corpus.name}
-                          </span>
+                          <span className="truncate text-sm font-bold">{corpus.name}</span>
                           {corpus.isNew ? (
                             <span className="rounded-sm bg-[var(--badge-surface)] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wide text-[var(--subtle-text)]">
                               New
@@ -502,7 +388,8 @@ export default function IngestionWorkbench() {
                           ) : null}
                         </span>
                         <span className="mt-0.5 block text-[10px] font-medium uppercase tracking-wide text-[var(--muted-text)]">
-                          {corpus.documents.length} {corpus.documents.length === 1 ? "document" : "documents"}
+                          {corpus.documents.length}{" "}
+                          {corpus.documents.length === 1 ? "document" : "documents"}
                         </span>
                       </span>
                       <FiChevronDown
@@ -524,11 +411,15 @@ export default function IngestionWorkbench() {
                           key={document.id}
                         >
                           <span className="flex min-w-0 items-center gap-2 py-2 pl-12 pr-4 text-xs text-[var(--tone-black)] sm:pl-16">
-                            <FiFileText aria-hidden="true" className="size-3.5 shrink-0 text-[var(--muted-text)]" />
+                            <FiFileText
+                              aria-hidden="true"
+                              className="size-3.5 shrink-0 text-[var(--muted-text)]"
+                            />
                             <span className="min-w-0 truncate">
                               <span className="block truncate">{document.originalFilename}</span>
                               <span className="block font-mono text-[9px] uppercase tracking-wide text-[var(--muted-text)]">
-                                {document.mimeType ?? "Document"} · {formatFileSize(document.sizeBytes)}
+                                {document.mimeType ?? "Document"} ·{" "}
+                                {formatFileSize(document.sizeBytes)}
                               </span>
                             </span>
                           </span>
@@ -544,15 +435,11 @@ export default function IngestionWorkbench() {
             })}
           </div>
         </div>
-      </section>
+      </WorkbenchGridCanvas>
 
       {/* Top-centered toast confirms the final upload outcome outside the modal. */}
       {notice ? (
-        <Toast
-          message={notice.message}
-          onDismiss={() => setNotice(null)}
-          type={notice.type}
-        />
+        <Toast message={notice.message} onDismiss={() => setNotice(null)} type={notice.type} />
       ) : null}
 
       {/* Focused upload modal retains the existing form over a blurred workspace. */}

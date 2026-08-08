@@ -1,8 +1,8 @@
 "use client";
 
-import axios from "axios";
 import { ChangeEvent, FormEvent, useState } from "react";
 import { FiFilePlus } from "react-icons/fi";
+import apiClient, { isAxiosError } from "@/lib/axios";
 
 type UploadResponse = {
   message: string;
@@ -15,22 +15,6 @@ type UploadFormProps = {
   onSuccess: (filenames: string[], corpusName: string) => void;
 };
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
-
-/**
- * Reads the upload API origin configured for the browser bundle.
- *
- * @returns The API base URL loaded by Next.js from the frontend environment file.
- */
-function getApiBaseUrl(): string {
-  // Fail with a clear setup message when the public API URL was not configured.
-  if (!apiBaseUrl) {
-    throw new Error("NEXT_PUBLIC_API_BASE_URL is not configured.");
-  }
-
-  return apiBaseUrl;
-}
-
 /**
  * Converts an unsuccessful upload request into a user-facing message.
  *
@@ -39,7 +23,7 @@ function getApiBaseUrl(): string {
  */
 function readUploadErrorMessage(error: unknown): string {
   // Prefer the backend's structured error message when it is available.
-  if (axios.isAxiosError(error)) {
+  if (isAxiosError(error)) {
     const payload = error.response?.data as {
       detail?: { message?: string } | string;
     };
@@ -63,11 +47,7 @@ function readUploadErrorMessage(error: unknown): string {
  * @param props - Modal callbacks for cancel, failure, and successful filenames.
  * @returns The interactive multipart document upload form.
  */
-export default function UploadForm({
-  onCancel,
-  onFailure,
-  onSuccess,
-}: UploadFormProps) {
+export default function UploadForm({ onCancel, onFailure, onSuccess }: UploadFormProps) {
   // Indicates that the form is waiting for the backend upload response.
   const [isUploading, setIsUploading] = useState(false);
 
@@ -99,10 +79,7 @@ export default function UploadForm({
     const corpusName = String(formData.get("corpusName") ?? "").trim();
 
     try {
-      const response = await axios.post<UploadResponse>(
-        `${getApiBaseUrl()}/uploads`,
-        formData,
-      );
+      const response = await apiClient.post<UploadResponse>("/uploads", formData);
       onSuccess(response.data.filenames, corpusName);
     } catch (error) {
       onFailure(readUploadErrorMessage(error));
@@ -139,10 +116,7 @@ export default function UploadForm({
         </div>
 
         {/* Hidden native input is controlled through the visible document drop zone. */}
-        <label
-          className="block text-sm font-semibold text-[var(--charcoal)]"
-          htmlFor="files"
-        >
+        <label className="block text-sm font-semibold text-[var(--charcoal)]" htmlFor="files">
           Files
         </label>
         <input

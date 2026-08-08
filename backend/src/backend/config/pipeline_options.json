@@ -1,0 +1,140 @@
+{
+  "chunking": {
+    "strategies": [
+      {
+        "value": "recursive",
+        "label": "Recursive",
+        "description": "Splits text using progressively smaller natural boundaries.",
+        "supports_overlap": true
+      },
+      {
+        "value": "fixed_size",
+        "label": "Fixed size",
+        "description": "Creates predictable token-sized chunks with optional overlap.",
+        "supports_overlap": true
+      },
+      {
+        "value": "paragraph_section",
+        "label": "Paragraph / section",
+        "description": "Preserves document paragraphs and sections where possible.",
+        "supports_overlap": false
+      }
+    ],
+    "chunk_size_tokens": {
+      "default": 800,
+      "minimum": 1
+    },
+    "chunk_overlap_tokens": {
+      "default": 100,
+      "minimum": 0
+    }
+  },
+  "embedding": {
+    "providers": [
+      {
+        "value": "ollama",
+        "label": "Ollama",
+        "models": [
+          {
+            "value": "all-minilm",
+            "label": "All MiniLM"
+          },
+          {
+            "value": "nomic-embed-text",
+            "label": "Nomic Embed Text"
+          }
+        ]
+      }
+    ],
+    "distance_metrics": [
+      {
+        "value": "cosine",
+        "label": "Cosine"
+      },
+      {
+        "value": "dot_product",
+        "label": "Dot product"
+      },
+      {
+        "value": "euclidean",
+        "label": "Euclidean"
+      }
+    ]
+  },
+  "retrieval": {
+    "top_k": {
+      "default": 10,
+      "minimum": 1
+    }
+  },
+  "generation": {
+    "providers": [
+      {
+        "value": "ollama",
+        "label": "Ollama",
+        "models": [
+          {
+            "value": "llama3.2:3b",
+            "label": "Llama 3.2 3B",
+            "capabilities": {
+              "context_window_tokens": 131072,
+              "max_output_tokens": null
+            }
+          }
+        ]
+      }
+    ],
+    "temperature": {
+      "default": 0.2,
+      "minimum": 0.0,
+      "maximum": 2.0
+    },
+    "max_output_tokens": {
+      "default": 1000,
+      "minimum": 1
+    }
+  },
+  "evaluation": {
+    "retrieval_metrics": [
+      {
+        "value": "hit_rate_at_k",
+        "label": "Hit Rate@K",
+        "description": "Checks whether any labelled relevant document appears in the top K.",
+        "selected_by_default": false
+      },
+      {
+        "value": "mrr",
+        "label": "MRR",
+        "description": "Rewards placing the first relevant document higher in the ranking.",
+        "selected_by_default": false
+      },
+      {
+        "value": "recall_at_k",
+        "label": "Recall@K",
+        "description": "Measures how many labelled relevant documents appear in the top K.",
+        "selected_by_default": false
+      }
+    ],
+    "answer_metrics": [
+      {
+        "value": "groundedness",
+        "label": "Groundedness",
+        "description": "Checks whether the answer is supported by the retrieved context.",
+        "selected_by_default": true
+      },
+      {
+        "value": "answer_relevance",
+        "label": "Answer relevance",
+        "description": "Checks whether the answer directly addresses the question.",
+        "selected_by_default": true
+      },
+      {
+        "value": "answer_correctness",
+        "label": "Answer correctness",
+        "description": "Compares the generated answer with a labelled reference answer.",
+        "requires_reference_answer": true,
+        "selected_by_default": false
+      }
+    ]
+  }
+}

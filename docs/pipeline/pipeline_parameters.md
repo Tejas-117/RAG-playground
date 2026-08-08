@@ -202,13 +202,20 @@ Holding the prompt steady in the MVP makes chunking, embedding, and retrieval co
 
 Keep evaluation optional and simple:
 
-- **Enable evaluation**.
-- **Evaluation dataset/question set**.
-- **Metrics to run**:
-  - Retrieval metrics: hit rate/recall at K and reciprocal rank, when ground truth exists.
-  - Answer metrics: basic groundedness/relevance evaluation, clearly labelled as evaluator-derived.
+- **Retrieval metrics**: select any combination of hit rate at K, recall at K,
+  and reciprocal rank when labelled relevant documents exist.
+- **Answer metrics**: select any combination of groundedness, answer relevance,
+  and answer correctness when their required inputs exist.
 
-If evaluation examples are not implemented, this stage remains backend-internal or unavailable in the first UI release.
+The query remains required, but both metric lists may be empty. Empty lists mean
+the run produces retrieval and generation output without evaluating it. New
+single-question experiments initially select groundedness and answer relevance;
+users may clear both selections. Retrieval metrics and answer correctness require
+dataset annotations and are unavailable for an ad hoc question.
+
+Evaluation configuration is stored with the immutable run snapshot. Metric
+execution and evaluation-result artifacts remain unavailable until the
+evaluation pipeline is implemented.
 
 ### Reserved for Later Versions
 
