@@ -46,7 +46,6 @@ class DocxParser:
         return ParsedDocument(
             text=document_text,
             pages=[page],
-            metadata={"source_path": str(file_path)},
             parser_name=self.parser_name,
             parser_version=self._get_parser_version(),
         )

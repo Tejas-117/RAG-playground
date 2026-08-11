@@ -36,11 +36,94 @@ def test_schema_creates_corpus_and_document_tables() -> None:
     assert {
         "corpus",
         "document",
+        "document_parse",
+        "parsed_page",
+        "parsed_block",
         "chunk_set",
         "chunk",
         "pipeline_run",
     }.issubset(table_names)
     assert not {"corpus_version", "corpus_version_document"}.intersection(table_names)
+
+
+def test_schema_stores_parse_text_once_with_offset_provenance() -> None:
+    """Verify canonical text, page offsets, and block offsets can be persisted.
+
+    Parameters:
+        None.
+    Returns:
+        None. Assertions verify the parsed-document relational model.
+    """
+    # Create an isolated database with production-equivalent foreign keys.
+    connection = sqlite3.connect(":memory:")
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    # Insert the immutable source hierarchy required by a parse artifact.
+    connection.execute(
+        "INSERT INTO corpus VALUES (?, ?, ?, ?, ?)",
+        ("corpus-1", "Docs", None, "2026-08-02T00:00:00Z", "2026-08-02T00:00:00Z"),
+    )
+    connection.execute(
+        "INSERT INTO document VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "document-1",
+            "corpus-1",
+            "guide.pdf",
+            "uploads/guide.pdf",
+            "application/pdf",
+            100,
+            "a" * 64,
+            "2026-08-02T00:00:00Z",
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO document_parse VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            "parse-1",
+            "document-1",
+            "First\n\nSecond",
+            13,
+            13,
+            "test",
+            "1",
+            "{}",
+            "[]",
+            1,
+            2,
+            5,
+            "2026-08-02T00:00:01Z",
+        ),
+    )
+    connection.execute(
+        "INSERT INTO parsed_page VALUES (?, ?, ?, ?, ?, ?)",
+        ("page-1", "parse-1", 1, 0, 13, "{}"),
+    )
+    connection.executemany(
+        "INSERT INTO parsed_block VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("block-1", "parse-1", "page-1", 0, 0, 0, 5, None, "{}"),
+            ("block-2", "parse-1", "page-1", 1, 1, 7, 13, None, "{}"),
+        ],
+    )
+
+    # Slice the one stored text value using the persisted block offsets.
+    text = connection.execute(
+        "SELECT normalized_text FROM document_parse WHERE id = 'parse-1'"
+    ).fetchone()[0]
+    offsets = connection.execute(
+        """
+        SELECT character_start_offset, character_end_offset
+        FROM parsed_block ORDER BY ordinal
+        """
+    ).fetchall()
+
+    # Confirm provenance resolves to exact text without duplicated block columns.
+    assert [text[start:end] for start, end in offsets] == ["First", "Second"]
 
 
 def test_schema_assigns_documents_to_corpora() -> None:

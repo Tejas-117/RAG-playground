@@ -51,7 +51,6 @@ class PptxParser:
         return ParsedDocument(
             text="\n\n".join(page.text for page in pages).strip(),
             pages=pages,
-            metadata={"source_path": str(file_path)},
             parser_name=self.parser_name,
             parser_version=self._get_parser_version(),
         )

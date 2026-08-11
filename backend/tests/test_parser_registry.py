@@ -97,7 +97,7 @@ class ParserRegistryTestCase(unittest.TestCase):
         self.assertEqual(parsed_document.text, "hello\nworld")
         self.assertEqual(parsed_document.parser_name, "plain_text")
         self.assertEqual(parsed_document.pages, [])
-        self.assertEqual(parsed_document.metadata["source_path"], str(file_path))
+        self.assertEqual(parsed_document.metadata, {})
 
     def test_pymupdf_parser_raises_dependency_error_when_package_is_missing(
         self,

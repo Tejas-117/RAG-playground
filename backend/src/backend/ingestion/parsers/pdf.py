@@ -66,7 +66,6 @@ class PyMuPDFParser:
         return ParsedDocument(
             text="\n\n".join(page.text for page in pages).strip(),
             pages=pages,
-            metadata={"source_path": str(file_path)},
             warnings=warnings,
             parser_name=self.parser_name,
             parser_version=self._get_parser_version(),
@@ -88,8 +87,14 @@ class PyMuPDFParser:
             box coordinates retained for source provenance.
         """
         parsed_blocks: list[ParsedBlock] = []
+        indexed_blocks = list(enumerate(raw_blocks))
+        reading_order_blocks = sorted(
+            indexed_blocks,
+            key=lambda item: (item[1][1], item[1][0], item[0]),
+        )
 
-        for block_index, block in enumerate(raw_blocks):
+        # Sort layout blocks top-to-bottom then left-to-right for stable output.
+        for source_block_index, block in reading_order_blocks:
             x0, y0, x1, y1, text, *_ = block
             normalized_text = str(text).strip()
 
@@ -100,7 +105,7 @@ class PyMuPDFParser:
                 ParsedBlock(
                     text=normalized_text,
                     page_number=page_number,
-                    block_index=block_index,
+                    block_index=source_block_index,
                     bbox=(float(x0), float(y0), float(x1), float(y1)),
                 )
             )

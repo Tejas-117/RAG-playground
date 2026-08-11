@@ -1,16 +1,25 @@
 import codecs
 import hashlib
 import sqlite3
+import time
 import uuid
 import zipfile
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from backend.db.repositories.corpora import create_upload_batch
+from backend.ingestion.canonicalization import (
+    ParsedDocumentValidationError,
+    canonicalize_parsed_document,
+)
 from backend.ingestion.parsers.base import DocumentParser
-from backend.ingestion.parsers.errors import UnsupportedFileTypeError
+from backend.ingestion.parsers.errors import (
+    ParserDependencyError,
+    UnsupportedFileTypeError,
+)
 from backend.ingestion.parsers.registry import (
     ParserRegistry,
     build_default_parser_registry,
@@ -298,13 +307,59 @@ async def _upload_files(
 
     stored_paths: list[Path] = []
     document_metadata: list[dict[str, Any]] = []
+    upload_committed = False
 
     try:
-        # Persist files with UUID names and collect metadata for database insertion.
+        # Store and parse each file before opening the atomic database transaction.
         for file, filename, parser, stored_name in validated_files:
             stored_path = UPLOADS_DIRECTORY / stored_name
             size_bytes, content_sha256 = await _save_file(file, stored_path)
             stored_paths.append(stored_path)
+            parse_started_at = time.perf_counter()
+
+            try:
+                # Parser libraries perform blocking file I/O and CPU work off-loop.
+                parsed_document = await run_in_threadpool(parser.parse, stored_path)
+                canonical_document = canonicalize_parsed_document(parsed_document)
+            except ParserDependencyError as error:
+                # A missing server dependency is operational, not invalid user input.
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "code": "parser_unavailable",
+                        "message": "The document parser is not available.",
+                        "filename": filename,
+                        "parser": parser.parser_name,
+                    },
+                ) from error
+            except ParsedDocumentValidationError as error:
+                # Surface safe canonicalization errors with their stable codes.
+                status_code = 413 if error.code == "parsed_document_too_large" else 422
+                raise HTTPException(
+                    status_code=status_code,
+                    detail={
+                        "code": error.code,
+                        "message": error.message,
+                        "filename": filename,
+                        "parser": parser.parser_name,
+                    },
+                ) from error
+            except Exception as error:
+                # Convert unexpected adapter failures into a safe per-document error.
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "document_parse_failed",
+                        "message": "The document could not be parsed.",
+                        "filename": filename,
+                        "parser": parser.parser_name,
+                    },
+                ) from error
+
+            parse_duration_ms = max(
+                0,
+                round((time.perf_counter() - parse_started_at) * 1000),
+            )
             document_metadata.append(
                 {
                     "original_filename": filename,
@@ -314,16 +369,16 @@ async def _upload_files(
                     "mime_type": None,
                     "size_bytes": size_bytes,
                     "content_sha256": content_sha256,
+                    "parse": canonical_document,
+                    "parse_duration_ms": parse_duration_ms,
                 }
             )
             # Print the original filename and selected parser as requested by ingestion.
             print(f"{filename} -> {parser.parser_name}", flush=True)
 
         persisted_corpus = create_upload_batch(resolved_corpus_name, document_metadata)
+        upload_committed = True
     except sqlite3.Error as error:
-        # Remove files when database persistence fails so storage cannot drift from metadata.
-        for stored_path in stored_paths:
-            stored_path.unlink(missing_ok=True)
         raise HTTPException(
             status_code=500,
             detail={
@@ -331,10 +386,15 @@ async def _upload_files(
                 "message": "The uploaded files could not be saved.",
             },
         ) from error
+    finally:
+        # Any validation, parser, or persistence failure rolls back all saved files.
+        if not upload_committed:
+            for stored_path in stored_paths:
+                stored_path.unlink(missing_ok=True)
 
     # Return machine-readable success data while preserving original filenames.
     return {
-        "message": "Files uploaded successfully.",
+        "message": "Files uploaded and parsed successfully.",
         "filenames": [filename for _, filename, _, _ in validated_files],
         "corpus": persisted_corpus,
     }

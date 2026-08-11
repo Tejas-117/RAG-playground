@@ -24,7 +24,6 @@ class PlainTextParser:
 
         return ParsedDocument(
             text=text,
-            metadata={"source_path": str(file_path)},
             parser_name=self.parser_name,
             parser_version=self._get_parser_version(),
         )
