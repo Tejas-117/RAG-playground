@@ -1,18 +1,15 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useState } from "react";
-import { FiFilePlus } from "react-icons/fi";
+import { FiFilePlus, FiFileText } from "react-icons/fi";
 import apiClient, { isAxiosError } from "@/lib/axios";
-
-type UploadResponse = {
-  message: string;
-  filenames: string[];
-};
+import { parseUploadResponse } from "@/validation/ingestion";
 
 type UploadFormProps = {
   onCancel: () => void;
   onFailure: (message: string) => void;
   onSuccess: (filenames: string[], corpusName: string) => void;
+  onUploadStateChange: (isUploading: boolean) => void;
 };
 
 /**
@@ -25,10 +22,15 @@ function readUploadErrorMessage(error: unknown): string {
   // Prefer the backend's structured error message when it is available.
   if (isAxiosError(error)) {
     const payload = error.response?.data as {
-      detail?: { message?: string } | string;
+      detail?: { filename?: string; message?: string } | string;
     };
 
     if (typeof payload.detail === "object" && payload.detail?.message) {
+      // Prefix document-specific failures with the filename supplied by the backend.
+      if (payload.detail.filename) {
+        return `${payload.detail.filename}: ${payload.detail.message}`;
+      }
+
       return payload.detail.message;
     }
 
@@ -36,6 +38,13 @@ function readUploadErrorMessage(error: unknown): string {
     if (typeof payload.detail === "string") {
       return payload.detail;
     }
+
+    return "The documents could not be uploaded. Check the files and try again.";
+  }
+
+  // Surface the controlled runtime-contract error produced by response validation.
+  if (error instanceof Error) {
+    return error.message;
   }
 
   return "The documents could not be uploaded. Check the files and try again.";
@@ -47,7 +56,12 @@ function readUploadErrorMessage(error: unknown): string {
  * @param props - Modal callbacks for cancel, failure, and successful filenames.
  * @returns The interactive multipart document upload form.
  */
-export default function UploadForm({ onCancel, onFailure, onSuccess }: UploadFormProps) {
+export default function UploadForm({
+  onCancel,
+  onFailure,
+  onSuccess,
+  onUploadStateChange,
+}: UploadFormProps) {
   // Indicates that the form is waiting for the backend upload response.
   const [isUploading, setIsUploading] = useState(false);
 
@@ -74,26 +88,32 @@ export default function UploadForm({ onCancel, onFailure, onSuccess }: UploadFor
   async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setIsUploading(true);
+    onUploadStateChange(true);
 
     const formData = new FormData(event.currentTarget);
     const corpusName = String(formData.get("corpusName") ?? "").trim();
 
     try {
-      const response = await apiClient.post<UploadResponse>("/uploads", formData);
-      onSuccess(response.data.filenames, corpusName);
+      const response = await apiClient.post<unknown>("/uploads", formData);
+      const uploadResult = parseUploadResponse(response.data);
+      onSuccess(uploadResult.filenames, corpusName);
     } catch (error) {
       onFailure(readUploadErrorMessage(error));
     } finally {
       setIsUploading(false);
+      onUploadStateChange(false);
     }
   }
 
   return (
-    <form onSubmit={handleSubmit}>
-      {/* File picker gives the existing upload interaction the Stitch workbench treatment. */}
-      <div className="p-6 sm:p-8">
+    <form
+      className="flex min-h-0 flex-1 flex-col overflow-hidden"
+      onSubmit={handleSubmit}
+    >
+      {/* File picker groups the corpus identity and its source documents. */}
+      <div className="min-h-0 overflow-y-auto p-5 sm:p-6">
         {/* Required naming field identifies the corpus created by this upload. */}
-        <div className="mb-6">
+        <div className="mb-4">
           <label
             className="block text-sm font-semibold text-[var(--charcoal)]"
             htmlFor="corpusName"
@@ -102,7 +122,12 @@ export default function UploadForm({ onCancel, onFailure, onSuccess }: UploadFor
           </label>
           <input
             autoComplete="off"
-            className="mt-2 block w-full rounded border border-[var(--border-strong)] bg-[var(--white)] px-3 py-2.5 font-mono text-sm text-[var(--charcoal)] outline-none transition-colors placeholder:text-[var(--placeholder-text)] hover:border-[var(--muted-text)] focus:border-[var(--charcoal)] focus:ring-1 focus:ring-[var(--charcoal)]"
+            className="mt-2 block w-full rounded border border-[var(--border-strong)]
+              bg-[var(--white)] px-3 py-2.5 font-mono text-sm text-[var(--charcoal)]
+              outline-none transition-colors placeholder:text-[var(--placeholder-text)]
+              hover:border-[var(--muted-text)] focus:border-[var(--charcoal)]
+              focus:ring-1 focus:ring-[var(--charcoal)]"
+            disabled={isUploading}
             id="corpusName"
             maxLength={100}
             name="corpusName"
@@ -110,18 +135,22 @@ export default function UploadForm({ onCancel, onFailure, onSuccess }: UploadFor
             required
             type="text"
           />
-          <p className="mt-2 text-xs leading-5 text-[var(--muted-text)]">
+          <p className="mt-1.5 text-xs leading-5 text-[var(--muted-text)]">
             Give this document collection a name you will recognize later.
           </p>
         </div>
 
         {/* Hidden native input is controlled through the visible document drop zone. */}
-        <label className="block text-sm font-semibold text-[var(--charcoal)]" htmlFor="files">
+        <label
+          className="block text-sm font-semibold text-[var(--charcoal)]"
+          htmlFor="files"
+        >
           Files
         </label>
         <input
           className="peer sr-only"
           id="files"
+          disabled={isUploading}
           multiple
           name="files"
           onChange={handleFileChange}
@@ -129,33 +158,111 @@ export default function UploadForm({ onCancel, onFailure, onSuccess }: UploadFor
           type="file"
         />
         <label
-          className="mt-3 flex min-h-56 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-[var(--border-strong)] bg-[var(--white)] px-6 py-10 text-center transition-colors hover:border-[var(--charcoal)] hover:bg-[var(--page-surface)] peer-focus-visible:outline-none peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--charcoal)] peer-focus-visible:ring-offset-2 sm:px-8"
+          className="mt-2 flex min-h-32 cursor-pointer flex-col items-center justify-center
+            rounded-lg border-2 border-dashed border-[var(--border-strong)]
+            bg-[var(--white)] px-6 py-6 text-center transition-colors
+            hover:border-[var(--charcoal)] hover:bg-[var(--page-surface)]
+            peer-disabled:cursor-not-allowed peer-disabled:opacity-60
+            peer-focus-visible:outline-none peer-focus-visible:ring-2
+            peer-focus-visible:ring-[var(--charcoal)] peer-focus-visible:ring-offset-2 sm:px-8"
           htmlFor="files"
         >
-          <span className="flex size-12 items-center justify-center rounded border border-[var(--border-subtle)] bg-[var(--panel-surface)]">
-            <FiFilePlus aria-hidden="true" className="size-6 text-[var(--muted-text)]" />
+          <span
+            className="flex size-10 items-center justify-center rounded border
+              border-[var(--border-subtle)] bg-[var(--panel-surface)]"
+          >
+            <FiFilePlus aria-hidden="true" className="size-5 text-[var(--muted-text)]" />
           </span>
-          <span className="mt-4 text-lg font-semibold text-[var(--charcoal)]">
+          <span className="mt-3 text-base font-semibold text-[var(--charcoal)]">
             {selectedFileNames.length > 0
-              ? `${selectedFileNames.length} ${selectedFileNames.length === 1 ? "file" : "files"} selected`
+              ? `${selectedFileNames.length} ${
+                  selectedFileNames.length === 1 ? "file" : "files"
+                } selected`
               : "Choose files"}
           </span>
-          <span className="mt-1 max-w-2xl break-words text-sm leading-6 text-[var(--muted-text)]">
+          <span className="mt-1 text-sm leading-6 text-[var(--muted-text)]">
             {selectedFileNames.length > 0
-              ? selectedFileNames.join(", ")
+              ? "Choose files again to replace this selection."
               : "Click to browse. Multiple files are supported."}
           </span>
         </label>
+
+        {/* Selected document names remain visible without expanding the upload dialog. */}
+        {selectedFileNames.length > 0 ? (
+          <section
+            aria-label="Selected files"
+            className="mt-4 overflow-hidden rounded border
+              border-[var(--border-subtle)] bg-[var(--white)]"
+          >
+            {/* List header separates the batch summary from the scrollable file rows. */}
+            <header
+              className="flex items-center justify-between border-b
+                border-[var(--border-subtle)] bg-[var(--panel-surface)] px-3 py-2"
+            >
+              <h3
+                className="font-mono text-[10px] font-bold uppercase tracking-[0.08em]
+                  text-[var(--subtle-text)]"
+              >
+                Selected files
+              </h3>
+              <span className="font-mono text-xs text-[var(--muted-text)]">
+                {selectedFileNames.length}
+              </span>
+            </header>
+
+            {/* Filename rows scroll independently when the selected batch is long. */}
+            <ol className="max-h-36 overflow-y-auto overscroll-contain">
+              {/* Each row keeps its full filename available while protecting the layout. */}
+              {selectedFileNames.map((fileName, index) => (
+                <li
+                  className="flex min-w-0 items-center gap-3 border-b
+                    border-[var(--border-subtle)] px-3 py-2.5 last:border-b-0"
+                  key={`${fileName}-${index}`}
+                >
+                  <FiFileText
+                    aria-hidden="true"
+                    className="size-4 shrink-0 text-[var(--muted-text)]"
+                  />
+                  <span
+                    className="min-w-0 flex-1 truncate font-mono text-xs
+                      text-[var(--charcoal)]"
+                    title={fileName}
+                  >
+                    {fileName}
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className="font-mono text-[10px] tabular-nums
+                      text-[var(--muted-text)]"
+                  >
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </section>
+        ) : null}
       </div>
 
       {/* Modal footer makes cancellation and upload confirmation explicit. */}
-      <footer className="flex flex-col gap-4 border-t border-[var(--border-subtle)] bg-[var(--page-surface)] px-6 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-8">
-        <p className="text-sm text-[var(--tone-black)]">
-          Files are uploaded only when you confirm this step.
+      <footer
+        className="flex shrink-0 flex-col gap-3 border-t border-[var(--border-subtle)]
+          bg-[var(--page-surface)] px-5 py-3 sm:flex-row sm:items-center
+          sm:justify-between sm:px-6"
+      >
+        <p aria-live="polite" className="text-sm text-[var(--tone-black)]">
+          {isUploading
+            ? "Uploading and parsing each document. Keep this dialog open."
+            : "Documents are parsed and saved when you confirm this step."}
         </p>
         <div className="flex justify-end gap-3">
           <button
-            className="rounded px-5 py-2.5 text-sm font-semibold text-[var(--tone-black)] transition-colors hover:bg-[var(--hover-surface)] hover:text-[var(--charcoal)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--charcoal)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded px-5 py-2.5 text-sm font-semibold
+              text-[var(--tone-black)] transition-colors
+              hover:bg-[var(--hover-surface)] hover:text-[var(--charcoal)]
+              focus-visible:outline-none focus-visible:ring-2
+              focus-visible:ring-[var(--charcoal)] disabled:cursor-not-allowed
+              disabled:opacity-50"
             disabled={isUploading}
             onClick={onCancel}
             type="button"
@@ -163,7 +270,11 @@ export default function UploadForm({ onCancel, onFailure, onSuccess }: UploadFor
             Cancel
           </button>
           <button
-            className="rounded bg-[var(--charcoal)] px-5 py-2.5 text-sm font-semibold text-[var(--white)] transition-colors hover:bg-[var(--primary-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--charcoal)] focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded bg-[var(--charcoal)] px-5 py-2.5 text-sm font-semibold
+              text-[var(--white)] transition-colors hover:bg-[var(--primary-hover)]
+              focus-visible:outline-none focus-visible:ring-2
+              focus-visible:ring-[var(--charcoal)] focus-visible:ring-offset-2
+              disabled:cursor-not-allowed disabled:opacity-50"
             disabled={isUploading || selectedFileNames.length === 0}
             type="submit"
           >
