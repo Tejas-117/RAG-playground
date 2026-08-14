@@ -186,9 +186,9 @@ Evaluation is separate from generation so an answer can be evaluated again witho
 
 The MVP should include:
 
-1. **Recursive chunking** as the default: split using a hierarchy such as sections, paragraphs, lines, sentences, and finally character/token boundaries.
+1. **Recursive chunking** as the default: split using a hierarchy such as paragraphs, sentences, lines, and finally word/token boundaries.
 2. **Fixed-size chunking with overlap** as a simple, predictable baseline.
-3. **Paragraph/section-aware chunking** to preserve authored structure when possible.
+3. **Paragraph chunking** to preserve complete paragraph boundaries when possible.
 
 Defer semantic, proposition, late, parent-child, graph, and hierarchical chunking. The MVP strategies are easier to explain, test, compare, and operate.
 
@@ -206,24 +206,24 @@ Chunk 3: tokens 800-1299
 
 The overlap is 100 tokens.
 
-### Paragraph/section-based and recursive chunking
+### Paragraph and recursive chunking
 
-Paragraph/section chunking uses document structure as its primary unit:
+Paragraph chunking uses complete paragraphs as its primary unit:
 
 ```text
-Section -> paragraphs -> split only when needed
+Paragraphs -> pack adjacent paragraphs -> split oversized paragraphs only
 ```
 
 Recursive chunking uses a fallback hierarchy:
 
 ```text
-Section boundary
-  -> paragraph boundary
-    -> sentence boundary
+Paragraph boundary
+  -> sentence boundary
+    -> line boundary
       -> word/token boundary
 ```
 
-Recursive chunking is more resilient for irregular or oversized content. Paragraph/section chunking is more focused on retaining authored structure.
+Recursive chunking is more resilient for irregular or oversized content. Paragraph chunking is more focused on retaining complete paragraph boundaries.
 
 ### Late chunking
 

@@ -272,6 +272,36 @@ Legacy documents without a parse artifact can have `parse: null`. Documents
 uploaded through the current parsing flow always receive a parse artifact when
 the upload succeeds.
 
+## Why Section-Aware Parsing Is Deferred
+
+The current parsing flow does not infer headings, semantic block roles, section
+boundaries, or a section hierarchy. It preserves canonical text, pages, source
+blocks, offsets, bounding boxes, and parser provenance instead.
+
+Model-based PDF layout classification was evaluated as a way to identify titles
+and section headings. It is comparatively slow for the synchronous upload flow,
+particularly for long or visually complex PDFs. Running that analysis during
+every upload would increase ingestion latency before chunking can begin.
+
+A lighter PDF implementation would need to infer sections from embedded
+bookmarks or heuristics such as font size, font weight, text position, and
+repeated headers. PDFs do not expose one reliable heading structure, so these
+rules would produce inconsistent results across documents. Libraries may also
+use similar heuristics internally; using a library does not by itself guarantee
+correct section detection.
+
+Markdown headings and DOCX heading styles are easier to identify, but supporting
+sections only for those formats would give chunking different structural
+semantics depending on the source format. Section-aware parsing is therefore
+deferred until its accuracy, latency, and cross-format behavior can be designed
+and evaluated together.
+
+This decision does not prevent paragraph chunking. Paragraph chunking operates
+on paragraph boundaries in the persisted canonical text and does not require
+semantic roles or a section hierarchy. Semantic chunking, which uses model-based
+meaning or similarity to choose boundaries, is also outside the current scope
+and is distinct from section-aware parsing.
+
 ## How Chunking Will Use the Artifact
 
 Future chunkers should load the persisted canonical artifact rather than parse

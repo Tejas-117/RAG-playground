@@ -186,9 +186,9 @@ The chunking implementation must follow these rules:
 5. Persist zero-based, end-exclusive character offsets into
    `document_parse.normalized_text` and token offsets where the strategy can
    define them accurately.
-6. Preserve natural boundaries for recursive and paragraph/section-aware
+6. Preserve natural boundaries for recursive and paragraph
    chunking; the tokeniser provides size measurement and oversized-unit
-   fallback boundaries rather than replacing structure-aware splitting.
+   fallback boundaries rather than replacing natural-boundary splitting.
 
 The intended loading pattern is:
 

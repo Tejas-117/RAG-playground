@@ -50,7 +50,7 @@ Chunking is the main configurable ingestion stage in the MVP.
 - **Chunking strategy**:
   - Recursive (default).
   - Fixed-size with overlap.
-  - Paragraph/section-aware.
+  - Paragraph.
 - **Chunk size**: expressed in tokens.
 - **Chunk overlap**: applicable to recursive and fixed-size strategies.
 - **Chunk preview**: an optional preview of representative chunks before running; it is not a persisted pipeline parameter.
@@ -238,7 +238,7 @@ Corpus
   Corpus: selected immutable corpus
 
 Chunking
-  Strategy: recursive | fixed-size | paragraph/section
+  Strategy: recursive | fixed-size | paragraph
   Chunk size: 800
   Overlap: 100
 
