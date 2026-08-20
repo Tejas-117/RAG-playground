@@ -63,6 +63,10 @@ Chunk size: 800 tokens
 Overlap: 100 tokens
 ```
 
+Paragraph chunking always resolves overlap to `0`. All strategies enforce an
+internal 32,000-character safety limit in addition to the selected token limit.
+The character cap is a backend guardrail rather than a user-configurable value.
+
 ### Reserved for Later Versions
 
 - Semantic chunking.
@@ -133,7 +137,8 @@ Recommended default:
 Top K: 10
 ```
 
-The UI should show each retrieved chunk with rank, source document/page/section, clearly labelled raw or normalized score, and chunk text.
+The UI should show each retrieved chunk with rank, source document/page, clearly
+labelled raw or normalized score, and chunk text.
 
 ### Reserved for Later Versions
 

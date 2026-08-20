@@ -82,6 +82,7 @@ Out of scope: Auth, multi-user isolation, source-code ingestion, Graph/Hierarchi
 
 - For every function written, add comments explaining the parameters, return value, and a short description of function
 - For every block (if-else, loops, methods, classes.. etc.,) add comments explaining what it does.
+- For any constants, magic numbers, non-obvious values add a comment with a short explanation.
 
 The below instructions are specifically for the frontend/ folder.
 - Any component/section, write a small description for it.

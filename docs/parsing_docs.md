@@ -302,23 +302,21 @@ semantic roles or a section hierarchy. Semantic chunking, which uses model-based
 meaning or similarity to choose boundaries, is also outside the current scope
 and is distinct from section-aware parsing.
 
-## How Chunking Will Use the Artifact
+## How Chunking Uses the Artifact
 
-Future chunkers should load the persisted canonical artifact rather than parse
-the source file again. A document-level chunking strategy can split
-`normalized_text` directly. The page and block ranges can then be intersected
-with each chunk's range to attach provenance such as:
+The chunk-set builder loads the persisted canonical artifact rather than parsing
+the source file again. Each strategy splits `normalized_text` directly. The
+builder intersects page and block ranges with each chunk range to attach:
 
 - Source document identifier
 - Page range
-- Source block information
-- Bounding boxes
+- Intersecting source-block ordinals
 - Parser and source metadata
 
 This layout gives chunkers one stable text representation while retaining the
 source structure required for citations, metadata filtering, and source
 highlighting. It also avoids storing duplicate copies of the page and block
-text.
+text. Section paths remain `NULL` because section-aware parsing is deferred.
 
 Streaming parsing is not part of the current implementation. Parsing currently
 finishes in memory before the canonical artifact is written to SQLite.

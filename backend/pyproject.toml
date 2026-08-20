@@ -8,9 +8,11 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "fastapi[standard]>=0.141.1",
+    "groq>=1.6.0",
     "pymupdf>=1.28.0",
     "python-docx>=1.2.0",
     "python-pptx>=1.0.2",
+    "tokenizers>=0.23.1",
 ]
 
 [project.scripts]

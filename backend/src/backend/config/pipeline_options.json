@@ -14,9 +14,9 @@
         "supports_overlap": true
       },
       {
-        "value": "paragraph_section",
-        "label": "Paragraph / section",
-        "description": "Preserves document paragraphs and sections where possible.",
+        "value": "paragraph",
+        "label": "Paragraph",
+        "description": "Preserves complete paragraph boundaries where possible.",
         "supports_overlap": false
       }
     ],

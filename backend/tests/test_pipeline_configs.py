@@ -42,8 +42,8 @@ def test_chunking_config_rejects_invalid_overlap() -> None:
         ChunkingConfig(chunk_size_tokens=100, chunk_overlap_tokens=100)
 
 
-def test_paragraph_section_config_requires_zero_overlap() -> None:
-    """Verify structure-aware chunking does not accept unused overlap settings.
+def test_paragraph_config_requires_zero_overlap() -> None:
+    """Verify paragraph chunking does not accept unused overlap settings.
 
     Parameters:
         None.
@@ -51,22 +51,35 @@ def test_paragraph_section_config_requires_zero_overlap() -> None:
         None. Assertions verify valid structure-aware configuration parsing.
     """
     # Resolve the zero-overlap default because this strategy does not slide a window.
-    default_configuration = ChunkingConfig(strategy=ChunkingStrategy.PARAGRAPH_SECTION)
+    default_configuration = ChunkingConfig(strategy=ChunkingStrategy.PARAGRAPH)
     assert default_configuration.chunk_overlap_tokens == 0
 
     # Reject an explicit overlap because paragraph/section chunking does not slide.
     with pytest.raises(ValidationError, match="must be 0"):
         ChunkingConfig(
-            strategy=ChunkingStrategy.PARAGRAPH_SECTION,
+            strategy=ChunkingStrategy.PARAGRAPH,
             chunk_overlap_tokens=10,
         )
 
     # Accept the explicit non-overlapping configuration for the structure-aware strategy.
     configuration = ChunkingConfig(
-        strategy=ChunkingStrategy.PARAGRAPH_SECTION,
+        strategy=ChunkingStrategy.PARAGRAPH,
         chunk_overlap_tokens=0,
     )
     assert configuration.chunk_overlap_tokens == 0
+
+
+def test_chunking_config_rejects_removed_paragraph_section_name() -> None:
+    """Verify new configurations cannot request the removed hybrid strategy.
+
+    Parameters:
+        None.
+    Returns:
+        None. A validation exception confirms the breaking rename is enforced.
+    """
+    # Keep section-aware semantics out of newly persisted immutable run snapshots.
+    with pytest.raises(ValidationError, match="paragraph_section"):
+        ChunkingConfig(strategy="paragraph_section")
 
 
 def test_embedding_config_validates_identifiers_and_metric() -> None:

@@ -2,7 +2,7 @@
 
 ## Decision
 
-The chunking stage will use the Hugging Face `tokenizers` runtime with the
+The chunking stage uses the Hugging Face `tokenizers` runtime with the
 `google-bert/bert-base-multilingual-cased` WordPiece tokeniser.
 
 The tokeniser is a fixed backend implementation detail. It is not selected by
@@ -122,7 +122,7 @@ point and must preserve exact canonical-text offsets.
 Save the tokeniser at this repository-relative path:
 
 ```text
-backend/src/backend/chunking/assets/bert-base-multilingual-cased/tokenizer.json
+backend/src/backend/ingestion/chunkers/assets/bert-base-multilingual-cased/tokenizer.json
 ```
 
 This location makes the file a versioned backend implementation asset. It must
@@ -130,9 +130,9 @@ not be placed under `data/`, because `data/` is reserved for local fixtures and
 must not contain runtime dependencies. It must also not be placed in the upload
 directory, because it is application code data rather than user content.
 
-The future chunking package should load the asset relative to its Python module,
-not from the process working directory. The backend package configuration must
-include the JSON file when a wheel is built.
+The chunking package loads the asset relative to its Python module, not from the
+process working directory. The backend package configuration includes the JSON
+file when a wheel is built.
 
 ## Pinned Download and Verification
 
@@ -141,11 +141,11 @@ tokeniser file. Do not download from the mutable `main` branch.
 
 ```bash
 mkdir -p \
-  backend/src/backend/chunking/assets/bert-base-multilingual-cased
+  backend/src/backend/ingestion/chunkers/assets/bert-base-multilingual-cased
 
 curl --fail --location \
   --output \
-  backend/src/backend/chunking/assets/bert-base-multilingual-cased/tokenizer.json \
+  backend/src/backend/ingestion/chunkers/assets/bert-base-multilingual-cased/tokenizer.json \
   https://huggingface.co/google-bert/bert-base-multilingual-cased/resolve/\
 0fcb34d393e71211e8d72b52c31a46e7b7597068/tokenizer.json
 ```
@@ -154,7 +154,7 @@ Verify the downloaded file before committing it:
 
 ```bash
 sha256sum \
-  backend/src/backend/chunking/assets/bert-base-multilingual-cased/tokenizer.json
+  backend/src/backend/ingestion/chunkers/assets/bert-base-multilingual-cased/tokenizer.json
 ```
 
 Expected result:
@@ -207,8 +207,8 @@ tokenizer = Tokenizer.from_file(str(asset_path))
 encoding = tokenizer.encode(canonical_text, add_special_tokens=False)
 ```
 
-The final implementation must wrap this library object behind a small typed
-backend interface rather than exposing it directly to each chunking strategy.
+`MultilingualBertTokenizer` wraps this library object behind the typed
+`ChunkingTokenizer` interface rather than exposing it to each strategy.
 
 ## Versioning and Fingerprints
 

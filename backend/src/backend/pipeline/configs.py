@@ -10,7 +10,7 @@ class ChunkingStrategy(str, Enum):
 
     RECURSIVE = "recursive"
     FIXED_SIZE = "fixed_size"
-    PARAGRAPH_SECTION = "paragraph_section"
+    PARAGRAPH = "paragraph"
 
 
 class DistanceMetric(str, Enum):
@@ -50,17 +50,15 @@ class ChunkingConfig(BaseModel):
         # Resolve a strategy-specific default so serialized run configurations are explicit.
         if self.chunk_overlap_tokens is None:
             self.chunk_overlap_tokens = (
-                0 if self.strategy is ChunkingStrategy.PARAGRAPH_SECTION else 100
+                0 if self.strategy is ChunkingStrategy.PARAGRAPH else 100
             )
 
-        # Paragraph/section chunking preserves structure and does not use overlap.
+        # Paragraph chunking preserves complete text units and does not use overlap.
         if (
-            self.strategy is ChunkingStrategy.PARAGRAPH_SECTION
+            self.strategy is ChunkingStrategy.PARAGRAPH
             and self.chunk_overlap_tokens != 0
         ):
-            raise ValueError(
-                "chunk_overlap_tokens must be 0 for paragraph_section chunking"
-            )
+            raise ValueError("chunk_overlap_tokens must be 0 for paragraph chunking")
 
         # Ensure sliding-window strategies always advance through the source text.
         if (

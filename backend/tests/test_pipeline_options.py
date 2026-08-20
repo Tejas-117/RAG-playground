@@ -56,6 +56,11 @@ def test_pipeline_options_expose_requested_ollama_models() -> None:
         metric["value"] for metric in answer_metrics if metric["selected_by_default"]
     ] == ["groundedness", "answer_relevance"]
 
+    # Expose paragraph chunking without implying unavailable section semantics.
+    chunking_values = [option["value"] for option in catalog["chunking"]["strategies"]]
+    assert "paragraph" in chunking_values
+    assert "paragraph_section" not in chunking_values
+
 
 class PipelineOptionsRouteTestCase(unittest.IsolatedAsyncioTestCase):
     """Regression tests for the pipeline-options API endpoint."""
