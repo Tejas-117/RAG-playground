@@ -271,9 +271,15 @@ A run records the exact effective configuration used for an execution. Named edi
 
 The first backend run slice supports a single ad hoc question. `POST /runs`
 validates the selected immutable corpus and backend-supported configuration,
-then stores the trimmed question and resolved configuration snapshot in
-`pipeline_run`. It does not execute pipeline stages yet. The question is stored
-on the run—not on the corpus or chunk set—because it is a query-specific input.
+then uses `PipelineExecutor` to persist the run and execute through chunking.
+The executor builds or reuses a ready chunk set, stores its ID directly on
+`pipeline_run`, and records whether reuse occurred. The question remains on the
+run because it is query-specific.
+
+Runs progress through `pending`, `running`, and either `completed` or `failed`.
+At this implementation stage, `completed` means every currently executable
+stage—chunking—finished successfully. Failed runs retain safe structured errors
+and timing, while invalid requests rejected before execution create no run.
 
 The effective configuration includes ordered `retrieval_metrics` and
 `answer_metrics` lists. Both lists may be empty to skip evaluation. A
@@ -321,10 +327,25 @@ For chunk sets the backend now:
 
 For example, changing only `top_k` does not change parse, chunk, or index fingerprints. It creates a new retrieval and generation result while reusing upstream work.
 
-Chunk-set construction is currently an internal service. It atomically writes a
-`ready` parent and all child chunks, or rolls the transaction back. `POST /runs`
-still validates and persists the immutable run snapshot; orchestration that
-invokes chunking from a run is a later pipeline-execution change.
+Chunk-set construction remains an independent internal stage service. It
+atomically writes a `ready` parent and all child chunks, or rolls the transaction
+back. `PipelineExecutor` invokes it from `POST /runs`, records lifecycle state,
+and links the resulting artifact without implementing chunk-boundary logic.
+
+The executor is the sequencing boundary for later services:
+
+```text
+PipelineExecutor
+  -> ChunkingService
+  -> EmbeddingIndexService  # future
+  -> RetrievalService       # future
+  -> GenerationService      # future
+  -> EvaluationService      # future
+```
+
+Each service owns its domain behavior and provider adapters. The executor owns
+only ordering, artifact handoff, overall timing, and failure transitions. It is
+stateless between requests so execution can move behind a job abstraction later.
 
 ## 6. Suggested MVP schema
 

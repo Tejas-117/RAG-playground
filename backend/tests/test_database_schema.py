@@ -325,7 +325,7 @@ def test_schema_records_chunk_set_provenance_and_chunks() -> None:
 
 
 def test_schema_records_single_question_pipeline_runs() -> None:
-    """Verify that a run retains its corpus, question, and configuration snapshot.
+    """Verify run lifecycle, configuration, and chunk-set provenance constraints.
 
     Parameters:
         None.
@@ -349,39 +349,94 @@ def test_schema_records_single_question_pipeline_runs() -> None:
         ),
     )
 
-    # Persist a representative question and valid JSON configuration snapshot.
+    # Insert the ready reusable artifact required by a completed run.
     connection.execute(
-        "INSERT INTO pipeline_run VALUES (?, ?, ?, ?, ?)",
+        """
+        INSERT INTO chunk_set (
+            id, corpus_id, fingerprint, chunking_config_json, chunker_name,
+            chunker_version, status, chunk_count, created_at, started_at,
+            completed_at, duration_ms, error_code, error_details_json
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ready', 0, ?, ?, ?, 1, NULL, NULL)
+        """,
         (
-            "run-1",
+            "chunk-set-1",
             "corpus-1",
-            "What is the refund policy?",
-            '{"retrieval":{"top_k":10}}',
+            "fingerprint-1",
+            '{"strategy":"recursive"}',
+            "recursive",
+            "1.0.0",
+            "2026-08-02T00:00:00Z",
+            "2026-08-02T00:00:00Z",
             "2026-08-02T00:00:01Z",
         ),
     )
+
+    # Persist a completed run linked directly to the exact ready chunk artifact.
+    connection.execute(
+        """
+        INSERT INTO pipeline_run (
+            id, corpus_id, chunk_set_id, question, effective_config_json,
+            status, chunk_set_reused, created_at, started_at, completed_at,
+            duration_ms, error_code, error_details_json
+        ) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, NULL, NULL)
+        """,
+        (
+            "run-1",
+            "corpus-1",
+            "chunk-set-1",
+            "What is the refund policy?",
+            '{"retrieval":{"top_k":10}}',
+            0,
+            "2026-08-02T00:00:01Z",
+            "2026-08-02T00:00:01Z",
+            "2026-08-02T00:00:02Z",
+            1000,
+        ),
+    )
     persisted_run = connection.execute(
-        "SELECT corpus_id, question, effective_config_json FROM pipeline_run"
+        """
+        SELECT corpus_id, chunk_set_id, question, effective_config_json,
+               status, chunk_set_reused
+        FROM pipeline_run
+        """
     ).fetchone()
 
-    # Confirm the run retains the complete immutable input required by later stages.
+    # Confirm immutable input and the selected reusable artifact remain distinguishable.
     assert persisted_run == (
         "corpus-1",
+        "chunk-set-1",
         "What is the refund policy?",
         '{"retrieval":{"top_k":10}}',
+        "completed",
+        0,
     )
 
-    # Exercise invalid inputs independently so both schema constraints are verified.
+    # Exercise malformed input snapshots independently of lifecycle constraints.
     invalid_runs = [
-        ("run-blank", "corpus-1", "   ", "{}", "2026-08-02T00:00:02Z"),
-        ("run-json", "corpus-1", "Question", "invalid", "2026-08-02T00:00:03Z"),
+        (
+            "run-blank",
+            "   ",
+            "{}",
+            "2026-08-02T00:00:02Z",
+        ),
+        (
+            "run-json",
+            "Question",
+            "invalid",
+            "2026-08-02T00:00:01Z",
+        ),
     ]
 
     # Reject blank questions and malformed configuration snapshots at persistence time.
     for invalid_run in invalid_runs:
         try:
             connection.execute(
-                "INSERT INTO pipeline_run VALUES (?, ?, ?, ?, ?)",
+                """
+                INSERT INTO pipeline_run (
+                    id, corpus_id, question, effective_config_json,
+                    status, created_at
+                ) VALUES (?, 'corpus-1', ?, ?, 'pending', ?)
+                """,
                 invalid_run,
             )
         except sqlite3.IntegrityError:
@@ -392,3 +447,27 @@ def test_schema_records_single_question_pipeline_runs() -> None:
             raise AssertionError(
                 "pipeline runs require a question and valid JSON config"
             )
+
+    # A completed run cannot omit the artifact and lifecycle values it claims exist.
+    try:
+        connection.execute(
+            """
+            INSERT INTO pipeline_run (
+                id, corpus_id, question, effective_config_json,
+                status, created_at
+            ) VALUES (?, ?, ?, ?, 'completed', ?)
+            """,
+            (
+                "run-incomplete",
+                "corpus-1",
+                "Question",
+                "{}",
+                "2026-08-02T00:00:04Z",
+            ),
+        )
+    except sqlite3.IntegrityError:
+        # Lifecycle checks prevent a completed run without a ready artifact reference.
+        pass
+    else:
+        # Fail explicitly if SQLite accepts contradictory completed-run state.
+        raise AssertionError("completed pipeline runs require chunk provenance")

@@ -504,6 +504,8 @@ export default function ExperimentWorkbench() {
       const response = await apiClient.post<unknown>("/runs", requestResult.data);
       const persistedRun = parseRunResponse(response.data);
 
+      console.log(response.data)
+
       setRunNotice({
         message: `Run ${persistedRun.id} was saved.`,
         type: "success",

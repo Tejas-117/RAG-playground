@@ -1,6 +1,7 @@
 """API tests for immutable single-question pipeline run persistence."""
 
 import json
+import re
 import sqlite3
 import unittest
 from pathlib import Path
@@ -11,6 +12,55 @@ from httpx import ASGITransport, AsyncClient, Response
 
 from backend.app import app
 from backend.db.connection import connect
+from backend.db.repositories.runs import InvalidRunStateError, complete_run
+from backend.ingestion.chunkers.models import TokenizedText, TokenOffset
+from backend.ingestion.chunkers.tokenizer import TokenizerAssetError
+from backend.pipeline.execution import PipelineExecutor, get_pipeline_executor
+
+
+class RunTestTokenizer:
+    """Provide deterministic offline token offsets to API execution tests."""
+
+    identifier = "run-test-tokenizer"
+    revision = "1"
+    asset_sha256 = "run-test-digest"
+    special_tokens_policy = "none"
+
+    def encode(self, text: str) -> TokenizedText:
+        """Map every non-whitespace test word to its source character range.
+
+        Args:
+            text: Canonical document text submitted by the chunking service.
+
+        Returns:
+            Ordered offsets for deterministic word-like test tokens.
+        """
+        # Regex offsets exercise production provenance without loading a model asset.
+        return TokenizedText(
+            offsets=tuple(
+                TokenOffset(match.start(), match.end())
+                for match in re.finditer(r"\S+", text)
+            )
+        )
+
+
+class UnavailableRunTestTokenizer(RunTestTokenizer):
+    """Simulate a production tokenizer asset that cannot be loaded."""
+
+    def encode(self, text: str) -> TokenizedText:
+        """Raise the operational tokenizer failure expected by the executor.
+
+        Args:
+            text: Canonical text that cannot be encoded by the missing asset.
+
+        Returns:
+            Never returns because the configured asset is unavailable.
+
+        Raises:
+            TokenizerAssetError: Always, to exercise structured failure handling.
+        """
+        # The error text is intentionally hidden by the public API mapping.
+        raise TokenizerAssetError("simulated missing tokenizer")
 
 
 def _run_payload() -> dict[str, object]:
@@ -61,8 +111,10 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
             self.database_path,
         )
         self.database_patch.start()
+        self.executor = PipelineExecutor(tokenizer=RunTestTokenizer())
+        app.dependency_overrides[get_pipeline_executor] = self._get_executor
 
-        # Seed the immutable corpus referenced by valid run requests.
+        # Seed one immutable corpus and completed canonical parse for valid runs.
         with connect() as connection:
             connection.execute(
                 "INSERT INTO corpus VALUES (?, ?, ?, ?, ?)",
@@ -74,6 +126,53 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
                     "2026-08-02T00:00:00Z",
                 ),
             )
+            connection.execute(
+                "INSERT INTO document VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "document-1",
+                    "corpus-1",
+                    "refunds.txt",
+                    "uploads/refunds.txt",
+                    "text/plain",
+                    42,
+                    "a" * 64,
+                    "2026-08-02T00:00:01Z",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO document_parse VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                (
+                    "parse-1",
+                    "document-1",
+                    "Refunds are processed within five business days.",
+                    48,
+                    48,
+                    "text-parser",
+                    "1.0.0",
+                    "{}",
+                    "[]",
+                    0,
+                    0,
+                    1,
+                    "2026-08-02T00:00:02Z",
+                ),
+            )
+
+    def _get_executor(self) -> PipelineExecutor:
+        """Return the deterministic executor used by this isolated API test.
+
+        Args:
+            None.
+
+        Returns:
+            Pipeline executor configured with the offline test tokenizer.
+        """
+        # FastAPI dependency overrides call this method for every test request.
+        return self.executor
 
     def tearDown(self) -> None:
         """Restore the database path and remove temporary test data.
@@ -84,6 +183,9 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
         Returns:
             None. Resources created by setup are released.
         """
+        # Restore the production dependency before releasing the isolated database.
+        app.dependency_overrides.pop(get_pipeline_executor, None)
+
         # Stop patching before deleting the temporary directory it references.
         self.database_patch.stop()
         self.database_directory.cleanup()
@@ -123,6 +225,10 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 201)
         response_data = response.json()
         self.assertEqual(response_data["question"], "What is the refund policy?")
+        self.assertEqual(response_data["status"], "completed")
+        self.assertEqual(response_data["chunking"]["status"], "ready")
+        self.assertGreater(response_data["chunking"]["chunk_count"], 0)
+        self.assertFalse(response_data["chunking"]["reused"])
         self.assertEqual(response_data["configuration"]["retrieval"]["top_k"], 10)
         self.assertEqual(
             response_data["configuration"]["generation"]["max_output_tokens"],
@@ -198,6 +304,27 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored_row[1], payload["question"])
         self.assertEqual(json.loads(stored_row[2]), payload["configuration"])
 
+    async def test_completed_run_rejects_second_completion(self) -> None:
+        """Verify terminal run history cannot be overwritten by a retry.
+
+        Args:
+            None.
+
+        Returns:
+            None. Assertions verify the repository lifecycle guard.
+        """
+        response = await self._post_run(_run_payload())
+        response_data = response.json()
+
+        # Repeating a terminal transition must fail instead of mutating history.
+        with self.assertRaises(InvalidRunStateError):
+            complete_run(
+                response_data["id"],
+                response_data["chunking"]["chunk_set_id"],
+                True,
+                1,
+            )
+
     async def test_create_run_rejects_blank_question(self) -> None:
         """Verify whitespace-only questions produce a structured validation error.
 
@@ -237,6 +364,110 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
         # Distinguish a missing corpus from general persistence failures.
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"]["code"], "corpus_not_found")
+
+    async def test_create_run_records_missing_parse_failure(self) -> None:
+        """Verify incomplete canonical inputs leave one structured failed run.
+
+        Args:
+            None.
+
+        Returns:
+            None. Assertions verify the API error and persisted lifecycle state.
+        """
+        # Remove only the parse so the selected corpus remains valid but unchunkable.
+        with connect() as connection:
+            connection.execute("DELETE FROM document_parse WHERE id = ?", ("parse-1",))
+
+        response = await self._post_run(_run_payload())
+
+        # The failure identifies both the auditable run and repairable document.
+        self.assertEqual(response.status_code, 409)
+        detail = response.json()["detail"]
+        self.assertEqual(detail["code"], "missing_parse_artifact")
+        self.assertEqual(detail["document_ids"], ["document-1"])
+
+        with sqlite3.connect(self.database_path) as connection:
+            failed_run = connection.execute(
+                """
+                SELECT id, status, chunk_set_id, error_code
+                FROM pipeline_run
+                """
+            ).fetchone()
+
+        self.assertEqual(failed_run[0], detail["run_id"])
+        self.assertEqual(failed_run[1:], ("failed", None, "missing_parse_artifact"))
+
+    async def test_create_run_records_empty_corpus_failure(self) -> None:
+        """Verify a known corpus without documents becomes a failed run.
+
+        Args:
+            None.
+
+        Returns:
+            None. Assertions verify conflict transport and auditable failure state.
+        """
+        # Insert a valid immutable corpus that intentionally has no document rows.
+        with connect() as connection:
+            connection.execute(
+                "INSERT INTO corpus VALUES (?, ?, ?, ?, ?)",
+                (
+                    "empty-corpus",
+                    "Empty corpus",
+                    None,
+                    "2026-08-02T00:00:00Z",
+                    "2026-08-02T00:00:00Z",
+                ),
+            )
+
+        payload = _run_payload()
+        payload["corpus_id"] = "empty-corpus"
+        response = await self._post_run(payload)
+
+        # A known but unusable corpus is a state conflict rather than a not-found error.
+        self.assertEqual(response.status_code, 409)
+        detail = response.json()["detail"]
+        self.assertEqual(detail["code"], "empty_corpus")
+
+        with sqlite3.connect(self.database_path) as connection:
+            failed_run = connection.execute(
+                """
+                SELECT status, error_code
+                FROM pipeline_run
+                WHERE id = ?
+                """,
+                (detail["run_id"],),
+            ).fetchone()
+
+        self.assertEqual(failed_run, ("failed", "empty_corpus"))
+
+    async def test_create_run_records_tokenizer_failure(self) -> None:
+        """Verify tokenizer asset failures are sanitized and persisted.
+
+        Args:
+            None.
+
+        Returns:
+            None. Assertions verify safe transport and database failure records.
+        """
+        # Replace the normal offline tokenizer with a deterministic failing adapter.
+        self.executor = PipelineExecutor(tokenizer=UnavailableRunTestTokenizer())
+        response = await self._post_run(_run_payload())
+
+        # Internal asset details must not leak through the structured API response.
+        self.assertEqual(response.status_code, 500)
+        detail = response.json()["detail"]
+        self.assertEqual(detail["code"], "chunking_tokenizer_unavailable")
+        self.assertNotIn("simulated", detail["message"])
+
+        with sqlite3.connect(self.database_path) as connection:
+            failed_run = connection.execute(
+                "SELECT status, error_code FROM pipeline_run"
+            ).fetchone()
+
+        self.assertEqual(
+            failed_run,
+            ("failed", "chunking_tokenizer_unavailable"),
+        )
 
     async def test_create_run_rejects_unsupported_provider(self) -> None:
         """Verify the backend catalog controls executable provider identifiers.
@@ -377,10 +608,20 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_response.status_code, 201)
         self.assertEqual(second_response.status_code, 201)
         self.assertNotEqual(first_response.json()["id"], second_response.json()["id"])
+        self.assertEqual(
+            first_response.json()["chunking"]["chunk_set_id"],
+            second_response.json()["chunking"]["chunk_set_id"],
+        )
+        self.assertFalse(first_response.json()["chunking"]["reused"])
+        self.assertTrue(second_response.json()["chunking"]["reused"])
 
         with sqlite3.connect(self.database_path) as connection:
             run_count = connection.execute(
                 "SELECT COUNT(*) FROM pipeline_run"
             ).fetchone()[0]
+            chunk_set_count = connection.execute(
+                "SELECT COUNT(*) FROM chunk_set"
+            ).fetchone()[0]
 
         self.assertEqual(run_count, 2)
+        self.assertEqual(chunk_set_count, 1)

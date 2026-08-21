@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
@@ -21,6 +23,19 @@ from backend.pipeline.configs import ChunkingConfig
 # to create deterministic chunk-set and chunk IDs. It must remain hardcoded and
 # unchanged so identical inputs keep the same IDs across processes and installations.
 _ARTIFACT_NAMESPACE = UUID("cfce009a-7f87-4a7c-86aa-76f2f613e0b4")
+
+
+@dataclass(frozen=True)
+class ChunkSetBuildResult:
+    """Return one ready chunk artifact and how this request obtained it.
+
+    Attributes:
+        artifact: Complete persisted chunk-set artifact and ordered chunks.
+        reused: Whether an already-ready artifact satisfied this request.
+    """
+
+    artifact: dict[str, Any]
+    reused: bool
 
 
 class ChunkingCorpusNotFoundError(LookupError):
@@ -53,7 +68,7 @@ def build_or_reuse_chunk_set(
     corpus_id: str,
     config: ChunkingConfig,
     tokenizer: ChunkingTokenizer | None = None,
-) -> dict[str, Any]:
+) -> ChunkSetBuildResult:
     """Build or reuse the complete chunk artifact for one immutable corpus.
 
     Args:
@@ -62,14 +77,18 @@ def build_or_reuse_chunk_set(
         tokenizer: Optional injected tokenizer for deterministic unit tests.
 
     Returns:
-        Ready chunk-set artifact with ordered persisted chunks.
+        Ready chunk-set artifact together with whether it was reused.
 
     Raises:
         ChunkingCorpusNotFoundError: If the corpus does not exist.
         EmptyChunkingCorpusError: If the corpus contains no documents.
         MissingParseArtifactError: If any document lacks canonical text.
     """
+
+    print("=============================== IN THE BUILD OR REUSE CHUNK SET FUNCTION ===============================")
+    print("=============================== LOADING CORPUS ===============================")
     corpus = load_corpus_chunking_inputs(corpus_id)
+    print(corpus)
 
     # Fail with a domain-specific error before tokenizer or persistence work begins.
     if corpus is None:
@@ -89,8 +108,15 @@ def build_or_reuse_chunk_set(
     if missing_parse_ids:
         raise MissingParseArtifactError(missing_parse_ids)
 
+    print("====================== RESOLVED TOKENIZER =======================")
     resolved_tokenizer = tokenizer or get_chunking_tokenizer()
+    print(resolved_tokenizer)
+
+    print("====================== RESOLVED CHUNKER =======================")
     chunker = get_chunker(config.strategy)
+    print(chunker)
+
+    print("====================== FINGERPRINT =======================")
     fingerprint = _build_fingerprint(
         corpus_id,
         documents,
@@ -99,11 +125,14 @@ def build_or_reuse_chunk_set(
         chunker.version,
         resolved_tokenizer,
     )
+    print(fingerprint)
+
+
     existing = get_ready_chunk_set(fingerprint)
 
     # Reuse an identical complete artifact without rerunning any chunking strategy.
     if existing is not None:
-        return existing
+        return ChunkSetBuildResult(artifact=existing, reused=True)
 
     started_counter = perf_counter()
     started_at = _utc_timestamp()
@@ -112,7 +141,9 @@ def build_or_reuse_chunk_set(
 
     # Chunk each document independently so overlap never crosses a source boundary.
     for document in documents:
+        print("====================== STARTED CHUNKING =======================")
         spans = chunker.chunk(document["normalized_text"], config, resolved_tokenizer)
+        print(len(spans))
 
         # Reset ordinals for each document while keeping globally stable chunk IDs.
         for ordinal, span in enumerate(spans):
@@ -140,13 +171,29 @@ def build_or_reuse_chunk_set(
         "completed_at": completed_at,
         "duration_ms": duration_ms,
     }
-    save_ready_chunk_set(chunk_set, chunks)
+    try:
+        # Persist the parent and all children atomically for the normal build path.
+        save_ready_chunk_set(chunk_set, chunks)
+    except sqlite3.IntegrityError:
+        # Concurrent identical requests can both miss the initial lookup. If another
+        # request committed this exact fingerprint first, use its complete artifact.
+        concurrently_persisted = get_ready_chunk_set(fingerprint)
+
+        # Only convert a uniqueness race into reuse when the expected artifact exists.
+        if concurrently_persisted is not None:
+            return ChunkSetBuildResult(
+                artifact=concurrently_persisted,
+                reused=True,
+            )
+
+        # Preserve unrelated integrity failures such as invalid child provenance.
+        raise
 
     # Read through the repository boundary so new and reused results share one shape.
     persisted = get_ready_chunk_set(fingerprint)
     if persisted is None:
         raise RuntimeError("The ready chunk set could not be read after persistence.")
-    return persisted
+    return ChunkSetBuildResult(artifact=persisted, reused=False)
 
 
 def _build_fingerprint(

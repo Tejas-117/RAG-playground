@@ -252,12 +252,15 @@ def test_build_chunk_set_persists_provenance_and_reuses_fingerprint(
     second = build_or_reuse_chunk_set("corpus-1", config, tokenizer)
 
     # Identical inputs return the one persisted artifact without re-encoding documents.
-    assert first["id"] == second["id"]
-    assert first["fingerprint"] == second["fingerprint"]
+    assert first.reused is False
+    assert second.reused is True
+    assert first.artifact["id"] == second.artifact["id"]
+    assert first.artifact["fingerprint"] == second.artifact["fingerprint"]
     assert tokenizer.encode_count == 2
-    assert first["chunk_count"] == 3
+    assert first.artifact["chunk_count"] == 3
     assert [
-        (chunk["source_document_id"], chunk["ordinal"]) for chunk in first["chunks"]
+        (chunk["source_document_id"], chunk["ordinal"])
+        for chunk in first.artifact["chunks"]
     ] == [
         ("document-a", 0),
         ("document-a", 1),
@@ -265,7 +268,7 @@ def test_build_chunk_set_persists_provenance_and_reuses_fingerprint(
     ]
 
     # Page, parse, and block provenance comes from half-open range intersections.
-    first_chunk = first["chunks"][0]
+    first_chunk = first.artifact["chunks"][0]
     assert first_chunk["text"] == "alpha beta"
     assert (first_chunk["page_start"], first_chunk["page_end"]) == (1, 1)
     assert first_chunk["source_metadata"]["parse_id"] == "parse-a"
@@ -275,8 +278,8 @@ def test_build_chunk_set_persists_provenance_and_reuses_fingerprint(
     # Reuse leaves exactly one ready parent row and preserves deterministic chunk IDs.
     with sqlite3.connect(isolated_database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM chunk_set").fetchone()[0] == 1
-    assert [chunk["id"] for chunk in first["chunks"]] == [
-        chunk["id"] for chunk in second["chunks"]
+    assert [chunk["id"] for chunk in first.artifact["chunks"]] == [
+        chunk["id"] for chunk in second.artifact["chunks"]
     ]
 
 
@@ -324,13 +327,65 @@ def test_chunk_set_fingerprint_changes_with_config_and_tokenizer(
     assert (
         len(
             {
-                baseline["fingerprint"],
-                changed_config["fingerprint"],
-                changed_tokenizer["fingerprint"],
+                baseline.artifact["fingerprint"],
+                changed_config.artifact["fingerprint"],
+                changed_tokenizer.artifact["fingerprint"],
             }
         )
         == 3
     )
+
+
+def test_concurrent_chunk_set_save_reuses_ready_winner(
+    isolated_database: Path,
+) -> None:
+    """Verify a uniqueness race converges on the concurrently saved artifact.
+
+    Args:
+        isolated_database: Initialized temporary application database.
+
+    Returns:
+        None. Assertions verify the race result and persisted artifact count.
+    """
+    _seed_complete_corpus()
+
+    def persist_then_raise(
+        chunk_set: dict[str, object],
+        chunks: list[dict[str, object]],
+    ) -> None:
+        """Simulate another request committing immediately before this save.
+
+        Args:
+            chunk_set: Complete parent artifact prepared by the service.
+            chunks: Ordered child chunks prepared by the service.
+
+        Returns:
+            None. The simulated losing request receives an integrity error.
+        """
+        # Persist through the real repository as if the concurrent winner committed.
+        chunk_set_repository.save_ready_chunk_set(chunk_set, chunks)
+        raise sqlite3.IntegrityError("simulated fingerprint race")
+
+    # Replace only the imported save boundary used by the orchestration service.
+    with patch(
+        "backend.ingestion.chunk_sets.save_ready_chunk_set",
+        side_effect=persist_then_raise,
+    ):
+        result = build_or_reuse_chunk_set(
+            "corpus-1",
+            ChunkingConfig(
+                strategy=ChunkingStrategy.FIXED_SIZE,
+                chunk_size_tokens=2,
+                chunk_overlap_tokens=0,
+            ),
+            CountingTokenizer(),
+        )
+
+    # The losing request returns the winner instead of exposing a uniqueness error.
+    assert result.reused is True
+    assert result.artifact["status"] == "ready"
+    with sqlite3.connect(isolated_database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM chunk_set").fetchone()[0] == 1
 
 
 def test_chunk_set_reports_unknown_empty_and_unparsed_corpora(

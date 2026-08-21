@@ -80,27 +80,32 @@ will live in Chroma and refer back to this stable `chunk.id`.
 | `section_path_json` | Optional ordered heading/section path for source display and filtering. |
 | `source_metadata_json` | Non-null JSON object containing parser/source metadata retained for provenance. |
 
-The current schema does not yet execute parsing or chunking. These tables make
-the resulting artifacts persistable when those stages are implemented.
+Parsing executes during upload. Chunking executes from `POST /runs` and writes
+or reuses these persisted artifacts before the run completes.
 
 ## `pipeline_run`
 
 Represents one immutable single-question run submitted from the experiment
-workbench. The current endpoint validates and stores the input but does not yet
-execute parsing, chunking, embedding, retrieval, generation, or evaluation.
+workbench. The current endpoint executes through chunking; embedding, retrieval,
+generation, and evaluation remain unimplemented.
 
 | Field | Description |
 | --- | --- |
 | `id` | Stable application-generated identifier for the run. Primary key. |
 | `corpus_id` | Immutable corpus selected for the run. Foreign key to `corpus.id`. |
+| `chunk_set_id` | Nullable while execution is pending or failed; completed runs reference the exact ready `chunk_set` they used. |
 | `question` | Trimmed, non-empty question submitted by the user. |
 | `effective_config_json` | Canonical JSON snapshot of the complete typed pipeline configuration, including resolved defaults. |
-| `created_at` | UTC timestamp when the run was persisted. |
+| `status` | Run lifecycle: `pending`, `running`, `completed`, or `failed`. |
+| `chunk_set_reused` | Nullable until chunking succeeds; records whether this execution reused an existing ready artifact. |
+| `created_at`, `started_at`, `completed_at` | UTC lifecycle timestamps. |
+| `duration_ms` | Total execution duration through the currently implemented chunking stage. |
+| `error_code` / `error_details_json` | Safe structured terminal failure information without raw traces. |
 
 The question belongs to the run because it is query-specific. It is not stored
 on `corpus`, `document`, or `chunk_set`. Identical submissions create separate
-run rows so each user action retains its own stable identity. Evaluation dataset
-tables and execution-result tables will be introduced only with those features.
+run rows, but their `chunk_set_id` values may match when the reusable fingerprint
+matches. Failures after creation remain as `failed` runs for auditability.
 
 ## Operational Note
 
@@ -113,8 +118,11 @@ names; `original_filename` remains available for display. The `GET /corpora/`
 route returns the persisted corpus and nested document records.
 
 The `POST /runs` route validates a selected corpus, a single question, and the
-complete pipeline configuration. It stores the normalized question and resolved
-configuration snapshot without executing the pipeline. The snapshot includes
-optional retrieval and answer metric lists; empty lists mean evaluation is
-skipped. No separate evaluation-result rows are created until metric execution
-is implemented.
+complete pipeline configuration. `PipelineExecutor` creates the lifecycle row,
+builds or reuses its chunk set in a worker thread, and stores the artifact link
+before returning. The snapshot includes optional retrieval and answer metric
+lists, but no later pipeline stages or evaluation results execute yet.
+
+The development database has no migration compatibility guarantee at this
+stage. After a breaking schema edit, `backend/rag_playground.sqlite3` may be
+recreated; uploaded source files are separate and need not be deleted.

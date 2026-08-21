@@ -8,37 +8,44 @@ The backend implements three document-local strategies over persisted
 - `paragraph`
 
 Chunking does not parse source files again and never combines text from separate
-documents. `POST /runs` does not invoke chunking yet; the reusable builder is an
-internal backend service for the later execution layer.
+documents. `POST /runs` invokes chunking through `PipelineExecutor`, which
+builds or reuses the exact artifact before completing the run.
 
 ## Shared Flow
 
 ```text
-corpus ID + resolved ChunkingConfig
+POST /runs + resolved PipelineConfig
+    -> create and start pipeline_run
+    -> pass corpus ID + resolved ChunkingConfig to the chunking service
     -> load ordered documents and canonical parses
     -> calculate compatibility fingerprint
     -> reuse matching ready chunk_set, if present
     -> tokenize and chunk every document independently
     -> attach page, block, parser, and document provenance
     -> atomically persist chunk_set and chunks
+    -> link chunk_set from pipeline_run and complete the run
 ```
 
 The process is:
 
-1. Load the corpus documents in their persisted order, together with each
+1. Validate the request and persist its immutable effective configuration with
+   `pending` status, then mark the run `running`.
+2. Load the corpus documents in their persisted order, together with each
    document's canonical parse text, pages, blocks, and parser metadata.
-2. Reject an unknown corpus, an empty corpus, or any document without a
+3. Reject an unknown corpus, an empty corpus, or any document without a
    completed canonical parse.
-3. Resolve the configured strategy and the fixed backend tokenizer.
-4. Fingerprint every input that can affect the output. Return the existing
+4. Resolve the configured strategy and the fixed backend tokenizer.
+5. Fingerprint every input that can affect the output. Return the existing
    ready chunk set when that exact fingerprint has already been persisted.
-5. Pass each document's `normalized_text` to the selected chunker separately.
+6. Pass each document's `normalized_text` to the selected chunker separately.
    The chunker returns exact text spans with character and token offsets.
-6. Convert each span into a persistable chunk. Assign its deterministic ID and
+7. Convert each span into a persistable chunk. Assign its deterministic ID and
    document-local ordinal, then derive its page and block provenance by offset
    intersection.
-7. Persist the chunk set and all of its chunks in one SQLite transaction, then
+8. Persist the chunk set and all of its chunks in one SQLite transaction, then
    read the completed artifact through the repository boundary.
+9. Store the ready chunk-set ID and reuse flag on the run, then mark it
+   `completed` with execution timestamps and duration.
 
 Chunk ordinals start at zero for every source document. Documents are never
 combined, so chunk overlap cannot cross from one document into another.
@@ -47,6 +54,26 @@ Chunk-set and chunk IDs use deterministic UUID5 values. The fingerprint includes
 the corpus and ordered document/parse IDs, resolved chunking configuration,
 chunker name/version, tokenizer identifier/revision/digest/special-token policy,
 and character safety limit. Identical ready artifacts are reused.
+
+The builder reports whether the current request created or reused the artifact.
+Concurrent requests calculating the same fingerprint converge on the single
+ready database artifact even if both performed the in-memory chunking work.
+
+## Pipeline Execution and Failures
+
+`PipelineExecutor` owns stage ordering and the overall run lifecycle. It does
+not implement tokenization or chunk boundaries; those remain in the chunking
+service and strategy classes. It is the future coordination point for
+embedding, retrieval, generation, and evaluation.
+
+Chunking runs in FastAPI's thread pool because tokenization and SQLite work are
+synchronous. A successful `POST /runs` response contains only the ready chunk
+set ID, status, chunk count, and reuse flag. Chunk bodies remain internal for
+the embedding stage.
+
+Failures after run creation are persisted with `failed` status, a stable error
+code, safe structured details, and timing. Chunk-set writes remain atomic, so a
+failed run cannot reference a partial artifact.
 
 ## Shared Chunk Rules
 

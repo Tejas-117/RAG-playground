@@ -150,16 +150,53 @@ CREATE INDEX IF NOT EXISTS idx_chunk_chunk_set_id
 CREATE INDEX IF NOT EXISTS idx_chunk_source_document_id
     ON chunk (source_document_id);
 
--- An immutable record of one user-submitted question and its fully resolved
--- pipeline configuration. Query-specific stage results will reference this row
--- when pipeline execution is implemented.
+-- One immutable pipeline execution, including its resolved configuration,
+-- lifecycle, reusable chunk artifact, timing, and structured failure state.
 CREATE TABLE IF NOT EXISTS pipeline_run (
     id TEXT PRIMARY KEY,
     corpus_id TEXT NOT NULL REFERENCES corpus(id) ON DELETE RESTRICT,
+    chunk_set_id TEXT REFERENCES chunk_set(id) ON DELETE RESTRICT,
     question TEXT NOT NULL CHECK (length(trim(question)) > 0),
     effective_config_json TEXT NOT NULL CHECK (json_valid(effective_config_json)),
-    created_at TEXT NOT NULL
+    status TEXT NOT NULL CHECK (
+        status IN ('pending', 'running', 'completed', 'failed')
+    ),
+    chunk_set_reused INTEGER CHECK (chunk_set_reused IN (0, 1)),
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    duration_ms INTEGER CHECK (duration_ms >= 0),
+    error_code TEXT,
+    error_details_json TEXT CHECK (
+        error_details_json IS NULL OR (
+            json_valid(error_details_json)
+            AND json_type(error_details_json) = 'object'
+        )
+    ),
+    CHECK (
+        status != 'running' OR started_at IS NOT NULL
+    ),
+    CHECK (
+        status != 'completed' OR (
+            chunk_set_id IS NOT NULL
+            AND chunk_set_reused IS NOT NULL
+            AND started_at IS NOT NULL
+            AND completed_at IS NOT NULL
+            AND duration_ms IS NOT NULL
+        )
+    ),
+    CHECK (
+        status != 'failed' OR (
+            started_at IS NOT NULL
+            AND completed_at IS NOT NULL
+            AND duration_ms IS NOT NULL
+            AND error_code IS NOT NULL
+        )
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_run_corpus_id
     ON pipeline_run (corpus_id);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_run_chunk_set_id
+    ON pipeline_run (chunk_set_id);
