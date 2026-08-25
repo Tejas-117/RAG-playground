@@ -1,5 +1,6 @@
 """HTTP route for executing immutable single-question pipeline runs."""
 
+import logging
 import sqlite3
 from typing import Annotated, Literal
 
@@ -21,6 +22,9 @@ from backend.pipeline.execution import (
 )
 
 router = APIRouter()
+
+# Use the module name so API-boundary run records remain distinguishable.
+logger = logging.getLogger(__name__)
 
 
 class RunCreateRequest(BaseModel):
@@ -104,13 +108,18 @@ async def create_pipeline_run(
     """
 
     normalized_question = payload.question.strip()
-
-    print("================= /RUNS ================= ")
-    print(payload)
-    print(normalized_question)
+    logger.info(
+        "pipeline_run_requested corpus_id=%s chunking_strategy=%s",
+        payload.corpus_id,
+        payload.configuration.chunking.strategy.value,
+    )
 
     # Reject blank questions before creating an immutable run record.
     if not normalized_question:
+        logger.warning(
+            "pipeline_run_rejected corpus_id=%s error_code=invalid_question",
+            payload.corpus_id,
+        )
         raise HTTPException(
             status_code=422,
             detail={
@@ -121,14 +130,9 @@ async def create_pipeline_run(
 
     try:
         # Validate semantic compatibility before any run lifecycle row is created.
-        print("=====================  LOADING PIPELINE OPTIONS... ==============================")
         options = _load_pipeline_options()
-        print("=====================  VALIDATING PIPELINE OPTIONS... ==============================")
         validate_pipeline_config(payload.configuration, options)
 
-        print(options)
-
-        print("===================== RUNNING THE EXECUTOR IN THREAD POOL ==============================")
         # Tokenization and SQLite are synchronous, so execute them off the event loop.
         persisted_run = await run_in_threadpool(
             executor.execute,
@@ -137,6 +141,11 @@ async def create_pipeline_run(
             payload.configuration,
         )
     except CorpusNotFoundError as error:
+        logger.warning(
+            "pipeline_run_rejected corpus_id=%s error_code=corpus_not_found",
+            payload.corpus_id,
+        )
+
         # Unknown corpora fail before pending-run creation and therefore have no run ID.
         raise HTTPException(
             status_code=404,
@@ -146,6 +155,13 @@ async def create_pipeline_run(
             },
         ) from error
     except InvalidPipelineConfigurationError as error:
+        logger.warning(
+            "pipeline_run_rejected corpus_id=%s "
+            "error_code=invalid_pipeline_configuration field=%s",
+            payload.corpus_id,
+            error.field,
+        )
+
         # Return the incompatible field without exposing internal adapter details.
         raise HTTPException(
             status_code=422,
@@ -156,6 +172,13 @@ async def create_pipeline_run(
             },
         ) from error
     except PipelineRunExecutionError as error:
+        logger.warning(
+            "pipeline_run_failed run_id=%s corpus_id=%s error_code=%s",
+            error.run_id,
+            payload.corpus_id,
+            error.code,
+        )
+
         # State conflicts are repairable inputs; all other execution failures are server-side.
         failure_status = (
             409
@@ -172,6 +195,12 @@ async def create_pipeline_run(
         }
         raise HTTPException(status_code=failure_status, detail=detail) from error
     except (OSError, ValidationError) as error:
+        logger.exception(
+            "pipeline_run_rejected corpus_id=%s "
+            "error_code=pipeline_options_unavailable",
+            payload.corpus_id,
+        )
+
         # Match the options endpoint when its version-controlled catalog is unavailable.
         raise HTTPException(
             status_code=500,
@@ -181,7 +210,10 @@ async def create_pipeline_run(
             },
         ) from error
     except sqlite3.Error as error:
-        print(error)
+        logger.exception(
+            "pipeline_run_failed corpus_id=%s error_code=persistence_error",
+            payload.corpus_id,
+        )
 
         # Hide database internals behind a stable persistence error response.
         raise HTTPException(

@@ -1,5 +1,6 @@
 import codecs
 import hashlib
+import logging
 import sqlite3
 import time
 import uuid
@@ -27,6 +28,9 @@ from backend.ingestion.parsers.registry import (
 
 router = APIRouter()
 
+# Use the module name so each upload and parsing record identifies its source.
+logger = logging.getLogger(__name__)
+
 # Keep the limit in bytes so validation is exact and independent of display units.
 MAX_FILE_SIZE_BYTES = 30 * 1024 * 1024
 UPLOADS_DIRECTORY = Path(__file__).resolve().parents[4] / "uploads"
@@ -48,6 +52,9 @@ def _validate_filename(filename: str | None) -> str:
 
     # Reject missing names and path components instead of silently rewriting them.
     if not filename or filename in {".", ".."} or Path(filename).name != filename:
+        logger.warning(
+            "upload_rejected error_code=invalid_filename filename=%r", filename
+        )
         raise HTTPException(
             status_code=400,
             detail={
@@ -135,6 +142,11 @@ def _get_parser_for_filename(registry: ParserRegistry, filename: str) -> Documen
         # Resolve a parser by extension
         return registry.get_parser_by_extension(Path(filename))
     except UnsupportedFileTypeError as error:
+        logger.warning(
+            "upload_rejected error_code=unsupported_file_type extension=%r",
+            error.extension,
+        )
+
         # Expose a stable API error code without leaking a traceback to the client.
         raise HTTPException(
             status_code=415,
@@ -233,6 +245,11 @@ async def _validate_file_content(
     # Reject content that does not match the selected parser format.
     if not is_valid:
         await file.seek(0)
+        logger.warning(
+            "upload_rejected error_code=invalid_file_content filename=%r parser=%s",
+            filename,
+            parser.parser_name,
+        )
         raise HTTPException(
             status_code=415,
             detail={
@@ -262,11 +279,17 @@ async def _upload_files(
     Raises:
         HTTPException: If validation or persistence fails.
     """
+    upload_started_counter = time.perf_counter()
+
+    # Log bounded request metadata without recording the corpus name or file contents.
+    logger.info("upload_started file_count=%d", len(files))
+
     # Normalize the required name before validating files or creating persisted state.
     resolved_corpus_name = corpus_name.strip()
 
     # Reject whitespace-only names because they cannot identify a corpus meaningfully.
     if not resolved_corpus_name:
+        logger.warning("upload_rejected error_code=invalid_corpus_name")
         raise HTTPException(
             status_code=422,
             detail={
@@ -287,6 +310,11 @@ async def _upload_files(
 
         # Reject oversized files before any upload is written to disk.
         if file_size > MAX_FILE_SIZE_BYTES:
+            logger.warning(
+                "upload_rejected error_code=file_too_large filename=%r size_bytes=%d",
+                filename,
+                file_size,
+            )
             raise HTTPException(
                 status_code=413,
                 detail={
@@ -301,6 +329,12 @@ async def _upload_files(
         await _validate_file_content(file, filename, parser)
         stored_name = f"{uuid.uuid4()}{Path(filename).suffix.lower()}"
         validated_files.append((file, filename, parser, stored_name))
+        logger.info(
+            "upload_file_validated filename=%r size_bytes=%d parser=%s",
+            filename,
+            file_size,
+            parser.parser_name,
+        )
 
     # Create the requested storage directory only after the complete request is valid.
     UPLOADS_DIRECTORY.mkdir(parents=True, exist_ok=True)
@@ -316,12 +350,25 @@ async def _upload_files(
             size_bytes, content_sha256 = await _save_file(file, stored_path)
             stored_paths.append(stored_path)
             parse_started_at = time.perf_counter()
+            logger.info(
+                "parsing_started filename=%r parser=%s size_bytes=%d",
+                filename,
+                parser.parser_name,
+                size_bytes,
+            )
 
             try:
                 # Parser libraries perform blocking file I/O and CPU work off-loop.
                 parsed_document = await run_in_threadpool(parser.parse, stored_path)
                 canonical_document = canonicalize_parsed_document(parsed_document)
             except ParserDependencyError as error:
+                logger.exception(
+                    "parsing_failed filename=%r parser=%s "
+                    "error_code=parser_unavailable",
+                    filename,
+                    parser.parser_name,
+                )
+
                 # A missing server dependency is operational, not invalid user input.
                 raise HTTPException(
                     status_code=500,
@@ -333,6 +380,13 @@ async def _upload_files(
                     },
                 ) from error
             except ParsedDocumentValidationError as error:
+                logger.warning(
+                    "parsing_failed filename=%r parser=%s error_code=%s",
+                    filename,
+                    parser.parser_name,
+                    error.code,
+                )
+
                 # Surface safe canonicalization errors with their stable codes.
                 status_code = 413 if error.code == "parsed_document_too_large" else 422
                 raise HTTPException(
@@ -345,6 +399,13 @@ async def _upload_files(
                     },
                 ) from error
             except Exception as error:
+                logger.exception(
+                    "parsing_failed filename=%r parser=%s "
+                    "error_code=document_parse_failed",
+                    filename,
+                    parser.parser_name,
+                )
+
                 # Convert unexpected adapter failures into a safe per-document error.
                 raise HTTPException(
                     status_code=422,
@@ -373,12 +434,35 @@ async def _upload_files(
                     "parse_duration_ms": parse_duration_ms,
                 }
             )
-            # Print the original filename and selected parser as requested by ingestion.
-            print(f"{filename} -> {parser.parser_name}", flush=True)
+            logger.info(
+                "parsing_completed filename=%r parser=%s duration_ms=%d "
+                "character_count=%d page_count=%d block_count=%d warning_count=%d",
+                filename,
+                parser.parser_name,
+                parse_duration_ms,
+                len(canonical_document.normalized_text),
+                len(canonical_document.pages),
+                canonical_document.block_count,
+                len(canonical_document.warnings),
+            )
 
         persisted_corpus = create_upload_batch(resolved_corpus_name, document_metadata)
         upload_committed = True
+        upload_duration_ms = max(
+            0,
+            round((time.perf_counter() - upload_started_counter) * 1000),
+        )
+        logger.info(
+            "upload_completed corpus_id=%s document_count=%d duration_ms=%d",
+            persisted_corpus["id"],
+            len(document_metadata),
+            upload_duration_ms,
+        )
     except sqlite3.Error as error:
+        logger.exception(
+            "upload_failed error_code=persistence_error stored_file_count=%d",
+            len(stored_paths),
+        )
         raise HTTPException(
             status_code=500,
             detail={
@@ -386,9 +470,20 @@ async def _upload_files(
                 "message": "The uploaded files could not be saved.",
             },
         ) from error
+    except OSError:
+        # Retain the existing server-error behavior while recording storage failures.
+        logger.exception(
+            "upload_failed error_code=storage_error stored_file_count=%d",
+            len(stored_paths),
+        )
+        raise
     finally:
         # Any validation, parser, or persistence failure rolls back all saved files.
         if not upload_committed:
+            logger.warning(
+                "upload_rolled_back stored_file_count=%d",
+                len(stored_paths),
+            )
             for stored_path in stored_paths:
                 stored_path.unlink(missing_ok=True)
 

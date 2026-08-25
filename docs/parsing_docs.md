@@ -44,6 +44,10 @@ is not committed until every document has parsed successfully. If validation,
 parsing, canonicalization, or persistence fails, all files saved for that
 request are removed and no partial corpus is retained.
 
+Upload and parsing lifecycle events, counts, durations, and safe failures are
+written through the centralized backend logger. See
+[logging_docs.md](logging_docs.md) for event names and privacy rules.
+
 ## Parser Output
 
 Each format-specific parser returns a transient `ParsedDocument`. Depending on

@@ -1,6 +1,5 @@
 import unittest
-from contextlib import redirect_stdout
-from io import BytesIO, StringIO
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -80,45 +79,49 @@ class UploadFilesTestCase(unittest.IsolatedAsyncioTestCase):
         self.threadpool_patch.start()
         self.addCleanup(self.threadpool_patch.stop)
 
-    async def test_upload_stores_files_and_prints_selected_parsers(self) -> None:
-        """Verify valid files are stored and their selected parsers are printed.
+    async def test_upload_stores_files_and_logs_stage_lifecycle(self) -> None:
+        """Verify valid files are stored and upload/parsing stages are logged.
 
         Returns:
             None. Assertions fail the test when endpoint behavior changes.
         """
-        output = StringIO()
         transport = ASGITransport(app=app)
         pdf_body = _create_pdf_bytes(["PDF notes"])
 
         with TemporaryDirectory() as directory:
             uploads_directory = Path(directory)
-            with patch(
-                "backend.api.routers.uploads.UPLOADS_DIRECTORY",
-                uploads_directory,
+            with (
+                patch(
+                    "backend.api.routers.uploads.UPLOADS_DIRECTORY",
+                    uploads_directory,
+                ),
+                self.assertLogs(
+                    "backend.api.routers.uploads",
+                    level="INFO",
+                ) as captured_logs,
             ):
                 async with AsyncClient(
                     transport=transport,
                     base_url="http://testserver",
                 ) as client:
-                    with redirect_stdout(output):
-                        response = await client.post(
-                            "/uploads",
-                            data={"corpusName": "Project notes"},
-                            files=[
+                    response = await client.post(
+                        "/uploads",
+                        data={"corpusName": "Project notes"},
+                        files=[
+                            (
+                                "files",
+                                ("notes.txt", BytesIO(b"notes"), "text/plain"),
+                            ),
+                            (
+                                "files",
                                 (
-                                    "files",
-                                    ("notes.txt", BytesIO(b"notes"), "text/plain"),
+                                    "report.pdf",
+                                    BytesIO(pdf_body),
+                                    "application/pdf",
                                 ),
-                                (
-                                    "files",
-                                    (
-                                        "report.pdf",
-                                        BytesIO(pdf_body),
-                                        "application/pdf",
-                                    ),
-                                ),
-                            ],
-                        )
+                            ),
+                        ],
+                    )
 
             self.assertEqual(response.status_code, 200)
             response_data = response.json()
@@ -138,10 +141,17 @@ class UploadFilesTestCase(unittest.IsolatedAsyncioTestCase):
                 [document["mime_type"] for document in corpus["documents"]],
                 [None, None],
             )
-            self.assertEqual(
-                output.getvalue().splitlines(),
-                ["notes.txt -> plain_text", "report.pdf -> pymupdf"],
+            combined_logs = "\n".join(captured_logs.output)
+            self.assertIn("upload_started file_count=2", combined_logs)
+            self.assertIn(
+                "parsing_completed filename='notes.txt' parser=plain_text",
+                combined_logs,
             )
+            self.assertIn(
+                "parsing_completed filename='report.pdf' parser=pymupdf",
+                combined_logs,
+            )
+            self.assertIn("upload_completed corpus_id=", combined_logs)
             stored_files = sorted(uploads_directory.iterdir())
             self.assertEqual(len(stored_files), 2)
             self.assertEqual({path.suffix for path in stored_files}, {".txt", ".pdf"})

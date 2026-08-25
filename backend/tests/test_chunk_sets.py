@@ -248,8 +248,9 @@ def test_build_chunk_set_persists_provenance_and_reuses_fingerprint(
         chunk_size_tokens=2,
         chunk_overlap_tokens=0,
     )
-    first = build_or_reuse_chunk_set("corpus-1", config, tokenizer)
-    second = build_or_reuse_chunk_set("corpus-1", config, tokenizer)
+    with patch("backend.ingestion.chunk_sets.logger") as chunk_logger:
+        first = build_or_reuse_chunk_set("corpus-1", config, tokenizer)
+        second = build_or_reuse_chunk_set("corpus-1", config, tokenizer)
 
     # Identical inputs return the one persisted artifact without re-encoding documents.
     assert first.reused is False
@@ -281,6 +282,11 @@ def test_build_chunk_set_persists_provenance_and_reuses_fingerprint(
     assert [chunk["id"] for chunk in first.artifact["chunks"]] == [
         chunk["id"] for chunk in second.artifact["chunks"]
     ]
+
+    # The service records both the initial build and the fingerprint reuse decision.
+    event_templates = [call.args[0] for call in chunk_logger.info.call_args_list]
+    assert any("chunk_set_completed" in event for event in event_templates)
+    assert any("chunk_set_reused" in event for event in event_templates)
 
 
 def test_chunk_set_fingerprint_changes_with_config_and_tokenizer(

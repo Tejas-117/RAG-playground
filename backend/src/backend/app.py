@@ -3,6 +3,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routers import corpora, pipeline_options, runs, testing, uploads
+from backend.logging_config import configure_logging
+
+# Configure application loggers before routes begin handling requests.
+configure_logging()
 
 app = FastAPI(title="RAG Playground API")
 

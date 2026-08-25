@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import sqlite3
 from bisect import bisect_right
 from dataclasses import dataclass
@@ -20,6 +21,9 @@ from backend.ingestion.chunkers.models import ChunkingTokenizer, ChunkSpan
 from backend.ingestion.chunkers.strategies import MAX_CHUNK_CHARACTERS, get_chunker
 from backend.ingestion.chunkers.tokenizer import get_chunking_tokenizer
 from backend.pipeline.configs import ChunkingConfig
+
+# Use the module name to identify chunk-set and per-document stage records.
+logger = logging.getLogger(__name__)
 
 # UUID5 combines this permanent application namespace with stable artifact inputs
 # to create deterministic chunk-set and chunk IDs. It must remain hardcoded and
@@ -101,16 +105,32 @@ def build_or_reuse_chunk_set(
         EmptyChunkingCorpusError: If the corpus contains no documents.
         MissingParseArtifactError: If any document lacks canonical text.
     """
+    logger.info(
+        "chunk_set_requested corpus_id=%s strategy=%s chunk_size_tokens=%d "
+        "chunk_overlap_tokens=%d",
+        corpus_id,
+        config.strategy.value,
+        config.chunk_size_tokens,
+        config.chunk_overlap_tokens or 0,
+    )
     corpus = load_corpus_chunking_inputs(corpus_id)
 
     # Fail with a domain-specific error before tokenizer or persistence work begins.
     if corpus is None:
+        logger.warning(
+            "chunk_set_rejected corpus_id=%s error_code=corpus_not_found",
+            corpus_id,
+        )
         raise ChunkingCorpusNotFoundError(corpus_id)
 
     documents = corpus["documents"]
 
     # A reusable artifact cannot represent an input set with no documents.
     if not documents:
+        logger.warning(
+            "chunk_set_rejected corpus_id=%s error_code=empty_corpus",
+            corpus_id,
+        )
         raise EmptyChunkingCorpusError(corpus_id)
 
     missing_parse_ids = [
@@ -119,6 +139,12 @@ def build_or_reuse_chunk_set(
 
     # Report every missing parse together so the caller can repair the corpus once.
     if missing_parse_ids:
+        logger.warning(
+            "chunk_set_rejected corpus_id=%s error_code=missing_parse_artifact "
+            "missing_document_count=%d",
+            corpus_id,
+            len(missing_parse_ids),
+        )
         raise MissingParseArtifactError(missing_parse_ids)
 
     resolved_tokenizer = tokenizer or get_chunking_tokenizer()
@@ -136,15 +162,40 @@ def build_or_reuse_chunk_set(
 
     # Reuse an identical complete artifact without rerunning any chunking strategy.
     if existing is not None:
+        logger.info(
+            "chunk_set_reused corpus_id=%s chunk_set_id=%s chunk_count=%d",
+            corpus_id,
+            existing["id"],
+            existing["chunk_count"],
+        )
         return ChunkSetBuildResult(artifact=existing, reused=True)
 
     started_counter = perf_counter()
     started_at = _utc_timestamp()
     chunk_set_id = str(uuid5(_ARTIFACT_NAMESPACE, f"chunk-set:{fingerprint}"))
     chunks: list[dict[str, Any]] = []
+    logger.info(
+        "chunk_set_build_started corpus_id=%s chunk_set_id=%s "
+        "document_count=%d strategy=%s",
+        corpus_id,
+        chunk_set_id,
+        len(documents),
+        chunker.name,
+    )
 
     # Chunk each document independently so overlap never crosses a source boundary.
     for document in documents:
+        document_started_counter = perf_counter()
+        logger.info(
+            "document_chunking_started corpus_id=%s chunk_set_id=%s document_id=%s "
+            "character_count=%d page_count=%d block_count=%d",
+            corpus_id,
+            chunk_set_id,
+            document["id"],
+            len(document["normalized_text"]),
+            len(document["pages"]),
+            len(document["blocks"]),
+        )
         spans = chunker.chunk(document["normalized_text"], config, resolved_tokenizer)
 
         # Build each provenance index once per document. Every generated chunk reuses
@@ -164,6 +215,20 @@ def build_or_reuse_chunk_set(
                     block_index,
                 )
             )
+
+        document_duration_ms = max(
+            0,
+            round((perf_counter() - document_started_counter) * 1000),
+        )
+        logger.info(
+            "document_chunking_completed corpus_id=%s chunk_set_id=%s "
+            "document_id=%s chunk_count=%d duration_ms=%d",
+            corpus_id,
+            chunk_set_id,
+            document["id"],
+            len(spans),
+            document_duration_ms,
+        )
 
     completed_at = _utc_timestamp()
     duration_ms = max(0, round((perf_counter() - started_counter) * 1000))
@@ -190,18 +255,44 @@ def build_or_reuse_chunk_set(
 
         # Only convert a uniqueness race into reuse when the expected artifact exists.
         if concurrently_persisted is not None:
+            logger.info(
+                "chunk_set_reused_after_race corpus_id=%s chunk_set_id=%s "
+                "chunk_count=%d",
+                corpus_id,
+                concurrently_persisted["id"],
+                concurrently_persisted["chunk_count"],
+            )
             return ChunkSetBuildResult(
                 artifact=concurrently_persisted,
                 reused=True,
             )
 
         # Preserve unrelated integrity failures such as invalid child provenance.
+        logger.exception(
+            "chunk_set_persistence_failed corpus_id=%s chunk_set_id=%s",
+            corpus_id,
+            chunk_set_id,
+        )
         raise
 
     # Read through the repository boundary so new and reused results share one shape.
     persisted = get_ready_chunk_set(fingerprint)
     if persisted is None:
+        logger.error(
+            "chunk_set_readback_failed corpus_id=%s chunk_set_id=%s",
+            corpus_id,
+            chunk_set_id,
+        )
         raise RuntimeError("The ready chunk set could not be read after persistence.")
+
+    logger.info(
+        "chunk_set_completed corpus_id=%s chunk_set_id=%s chunk_count=%d "
+        "duration_ms=%d",
+        corpus_id,
+        chunk_set_id,
+        persisted["chunk_count"],
+        duration_ms,
+    )
     return ChunkSetBuildResult(artifact=persisted, reused=False)
 
 

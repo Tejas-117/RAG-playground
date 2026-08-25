@@ -1,5 +1,6 @@
 """Coordinate pipeline stages while keeping stage implementations independent."""
 
+import logging
 import sqlite3
 from collections.abc import Callable
 from time import perf_counter
@@ -23,6 +24,9 @@ from backend.ingestion.chunk_sets import (
 from backend.ingestion.chunkers.models import ChunkingTokenizer
 from backend.ingestion.chunkers.tokenizer import TokenizerAssetError
 from backend.pipeline.configs import ChunkingConfig, PipelineConfig
+
+# Use the module name to identify overall pipeline lifecycle records.
+logger = logging.getLogger(__name__)
 
 # A chunk-set builder receives immutable inputs and returns a ready reusable artifact.
 ChunkSetBuilder = Callable[
@@ -107,22 +111,13 @@ class PipelineExecutor:
             sqlite3.Error: If the pending run cannot be created or started.
         """
         # Persist the immutable request first so execution failures remain auditable.
-
-        print ("================ IN THE PIPELINE EXECUTOR (EXECUTE) ================== ")
-        print("======================== CREATING PENDING RUN ==============================")
         pending_run = create_pending_run(corpus_id, question, configuration)
-        print(pending_run)
-
         run_id = pending_run["id"]
         started_counter = perf_counter()
+        logger.info("pipeline_run_created run_id=%s corpus_id=%s", run_id, corpus_id)
 
-        print("======================== MARK RUN RUNNING ==============================")
         mark_run_running(run_id)
-
-        print("========================  CHUNK SET BUILDER ==============================")
-        print(self._chunk_set_builder)
-        print("========================  TOKENIZER ==============================")
-        print(self._tokenizer)
+        logger.info("pipeline_run_started run_id=%s corpus_id=%s", run_id, corpus_id)
 
         try:
             # Chunking is the first and currently only executable pipeline stage.
@@ -134,16 +129,34 @@ class PipelineExecutor:
             duration_ms = _elapsed_milliseconds(started_counter)
 
             # A run completes only after it references a fully persisted ready artifact.
-            return complete_run(
+            completed_run = complete_run(
                 run_id,
                 chunking_result.artifact["id"],
                 chunking_result.reused,
                 duration_ms,
             )
+            logger.info(
+                "pipeline_run_completed run_id=%s corpus_id=%s chunk_set_id=%s "
+                "chunk_set_reused=%s duration_ms=%d",
+                run_id,
+                corpus_id,
+                chunking_result.artifact["id"],
+                chunking_result.reused,
+                duration_ms,
+            )
+            return completed_run
         except Exception as error:
             # Convert stage-specific errors into one safe, persisted run failure shape.
             execution_error = _map_execution_error(run_id, error)
             duration_ms = _elapsed_milliseconds(started_counter)
+            logger.exception(
+                "pipeline_run_stage_failed run_id=%s corpus_id=%s stage=chunking "
+                "error_code=%s duration_ms=%d",
+                run_id,
+                corpus_id,
+                execution_error.code,
+                duration_ms,
+            )
             error_details = {
                 "stage": "chunking",
                 "message": execution_error.message,
@@ -159,6 +172,12 @@ class PipelineExecutor:
                     duration_ms,
                 )
             except (sqlite3.Error, InvalidRunStateError) as persistence_error:
+                logger.exception(
+                    "pipeline_run_failure_persistence_failed run_id=%s corpus_id=%s",
+                    run_id,
+                    corpus_id,
+                )
+
                 # If failure recording itself fails, expose a persistence error without
                 # leaking either database details or the original stage exception.
                 raise PipelineRunExecutionError(

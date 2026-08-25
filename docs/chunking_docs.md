@@ -59,6 +59,11 @@ The builder reports whether the current request created or reused the artifact.
 Concurrent requests calculating the same fingerprint converge on the single
 ready database artifact even if both performed the in-memory chunking work.
 
+Chunk-set and per-document lifecycle events include bounded input counts,
+output counts, durations, reuse decisions, and stable identifiers. See
+[logging_docs.md](logging_docs.md) for the logging configuration and privacy
+rules.
+
 ## Pipeline Execution and Failures
 
 `PipelineExecutor` owns stage ordering and the overall run lifecycle. It does
