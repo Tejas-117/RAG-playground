@@ -2,8 +2,9 @@
 
 All strategies work with two related coordinate systems:
 
-* Token indices identify entries in the tokenizer's ordered ``offsets`` tuple.
-  Token ranges are half-open, so ``[0, 4)`` contains tokens 0 through 3.
+* Token indices address matching entries in the tokenizer's ``token_starts`` and
+  ``token_ends`` tuples. Token ranges are half-open, so ``[0, 4)`` contains tokens
+  0 through 3.
 * Character offsets identify positions in the persisted canonical text. They are
   also half-open, so ``text[character_start:character_end]`` reproduces a chunk.
 
@@ -19,7 +20,7 @@ from backend.ingestion.chunkers.models import (
     Chunker,
     ChunkingTokenizer,
     ChunkSpan,
-    TokenOffset,
+    TokenizedText,
 )
 from backend.pipeline.configs import ChunkingConfig, ChunkingStrategy
 
@@ -69,7 +70,7 @@ class FixedSizeChunker:
         """Split canonical text into fixed-width, overlapping token windows.
 
         The document is tokenized once. ``token_start`` is an index in the returned
-        offset tuple, while ``chunk_size_tokens`` is a count. Adding them produces
+        boundary arrays, while ``chunk_size_tokens`` is a count. Adding them produces
         the exclusive token boundary for a window, just like a Python slice. The
         stride subtracts overlap so the requested trailing tokens are repeated at
         the beginning of the next chunk.
@@ -82,14 +83,13 @@ class FixedSizeChunker:
         Returns:
             Ordered exact canonical-text slices with document-global offsets.
         """
-        # One offset entry maps each tokenizer token back to its character interval
-        # in the canonical document. len(offsets) is therefore the document's token
-        # count, and offsets[index] describes the token at that global index.
-        offsets = tokenizer.encode(text).offsets
+        # Parallel boundary arrays map every global token index to its exact source
+        # character interval without allocating an object for every document token.
+        tokenized = tokenizer.encode(text)
 
         # Whitespace-only or unusual input may produce no tokenizer-visible tokens.
         # Character fallback still makes bounded progress for any non-empty content.
-        if not offsets:
+        if not tokenized.token_starts:
             return _character_fallback(text, 0, len(text))
 
         # Configuration validation guarantees overlap is smaller than chunk size.
@@ -102,19 +102,22 @@ class FixedSizeChunker:
 
         # Build half-open token windows [token_start, token_end). token_end is an
         # exclusive boundary rather than the index of the last included token.
-        while token_start < len(offsets):
+        while token_start < len(tokenized.token_starts):
             # Cap the calculated end at the total token count so the last window can
             # be shorter than chunk_size_tokens without indexing beyond offsets.
-            token_end = min(token_start + config.chunk_size_tokens, len(offsets))
+            token_end = min(
+                token_start + config.chunk_size_tokens,
+                len(tokenized.token_starts),
+            )
 
             # Convert token indices into an exact character slice. The independent
             # character guard handles pathological cases such as one enormous token.
-            span = _span_from_tokens(text, offsets, token_start, token_end)
+            span = _span_from_tokens(text, tokenized, token_start, token_end)
             spans.extend(_enforce_character_limit(text, span))
 
             # Once this window includes the last token, another stride would create
             # a redundant chunk containing only tokens already used as overlap.
-            if token_end == len(offsets):
+            if token_end == len(tokenized.token_starts):
                 break
 
             # Move past the newly consumed tokens while retaining the configured
@@ -157,24 +160,28 @@ class RecursiveChunker:
         Returns:
             Ordered canonical-text slices that prefer natural ending boundaries.
         """
-        # Token offsets let the strategy enforce token counts while returning exact
-        # slices of the original canonical text rather than reconstructed token text.
-        offsets = tokenizer.encode(text).offsets
+        # Parallel boundary arrays enforce token counts while retaining exact source
+        # slices, and every recursive helper reuses these same arrays.
+        tokenized = tokenizer.encode(text)
 
         # If no token boundaries exist, split directly by characters so unusual input
         # cannot disappear or cause the token-window loop to stall.
-        if not offsets:
+        if not tokenized.token_starts:
             return _character_fallback(text, 0, len(text))
 
         # Phase 1: recursively inspect the entire token range and collect global,
         # exclusive token indices that represent acceptable natural unit endings.
-        natural_ends = _collect_recursive_leaf_ends(
-            text,
-            offsets,
-            0,
-            len(offsets),
-            config.chunk_size_tokens,
-            0,
+        natural_ends = tuple(
+            sorted(
+                _collect_recursive_leaf_ends(
+                    text,
+                    tokenized,
+                    0,
+                    len(tokenized.token_starts),
+                    config.chunk_size_tokens,
+                    0,
+                )
+            )
         )
         overlap = config.chunk_overlap_tokens or 0
         spans: list[ChunkSpan] = []
@@ -182,18 +189,27 @@ class RecursiveChunker:
 
         # Phase 2: construct chunks from the discovered ends. token_start remains a
         # document-global token index even when overlap moves it into a prior unit.
-        while token_start < len(offsets):
+        while token_start < len(tokenized.token_starts):
             # The token budget establishes the furthest possible end. The character
             # safety limit may pull it earlier when normal tokens cover excessive text.
-            maximum_end = min(token_start + config.chunk_size_tokens, len(offsets))
-            maximum_end = _fit_character_limit(offsets, token_start, maximum_end)
+            maximum_end = min(
+                token_start + config.chunk_size_tokens,
+                len(tokenized.token_starts),
+            )
+            maximum_end = _fit_character_limit(
+                tokenized,
+                token_start,
+                maximum_end,
+            )
 
-            # Consider only natural ends after the current start and within both hard
-            # limits. Choosing max() packs as much natural text as the window permits.
-            candidates = [
-                end for end in natural_ends if token_start < end <= maximum_end
-            ]
-            token_end = max(candidates, default=maximum_end)
+            # Binary-search the sorted natural boundaries for the rightmost end within
+            # the current hard limits instead of scanning every document boundary.
+            candidate_index = bisect_right(natural_ends, maximum_end) - 1
+            token_end = (
+                natural_ends[candidate_index]
+                if candidate_index >= 0 and natural_ends[candidate_index] > token_start
+                else maximum_end
+            )
 
             # A selected unit can be no larger than the requested overlap. In that
             # case token_end - overlap would fail to advance, so use the full allowed
@@ -202,11 +218,11 @@ class RecursiveChunker:
                 token_end = maximum_end
 
             # Materialize the selected global token interval as persisted source text.
-            span = _span_from_tokens(text, offsets, token_start, token_end)
+            span = _span_from_tokens(text, tokenized, token_start, token_end)
             spans.extend(_enforce_character_limit(text, span))
 
             # Do not emit a final overlap-only window after reaching the document end.
-            if token_end == len(offsets):
+            if token_end == len(tokenized.token_starts):
                 break
 
             # Normally the next start repeats exactly overlap tokens. max() also
@@ -248,20 +264,20 @@ class ParagraphChunker:
         Returns:
             Ordered, non-overlapping canonical-text slices.
         """
-        # Tokenize once so paragraph character ranges can be mapped to global token
-        # indices and measured without repeatedly encoding paragraph substrings.
-        offsets = tokenizer.encode(text).offsets
+        # Tokenize once so paragraph character ranges can be mapped through shared,
+        # document-global boundary arrays without repeatedly rebuilding those arrays.
+        tokenized = tokenizer.encode(text)
 
         # Preserve bounded content through character slicing if the tokenizer exposes
         # no usable offsets for this document.
-        if not offsets:
+        if not tokenized.token_starts:
             return _character_fallback(text, 0, len(text))
 
         # Convert every content-bearing, blank-line-delimited character region into a
         # half-open global token range such as [paragraph_start, paragraph_end).
         paragraph_ranges = _token_ranges_for_split_text(
             text,
-            offsets,
+            tokenized,
             0,
             len(text),
             _PARAGRAPH_SEPARATOR,
@@ -278,7 +294,8 @@ class ParagraphChunker:
             # final included token end and therefore includes internal separators.
             paragraph_tokens = paragraph_end - paragraph_start
             paragraph_characters = (
-                offsets[paragraph_end - 1].end - offsets[paragraph_start].start
+                tokenized.token_ends[paragraph_end - 1]
+                - tokenized.token_starts[paragraph_start]
             )
 
             # A paragraph exceeding either hard limit cannot remain whole. First emit
@@ -290,7 +307,7 @@ class ParagraphChunker:
             ):
                 if packed_start is not None and packed_end is not None:
                     spans.append(
-                        _span_from_tokens(text, offsets, packed_start, packed_end)
+                        _span_from_tokens(text, tokenized, packed_start, packed_end)
                     )
                     packed_start = None
                     packed_end = None
@@ -298,7 +315,7 @@ class ParagraphChunker:
                 spans.extend(
                     _non_overlapping_token_spans(
                         text,
-                        offsets,
+                        tokenized,
                         paragraph_start,
                         paragraph_end,
                         config.chunk_size_tokens,
@@ -316,7 +333,8 @@ class ParagraphChunker:
             # the current paragraph, including whitespace separating those paragraphs.
             combined_tokens = paragraph_end - packed_start
             combined_characters = (
-                offsets[paragraph_end - 1].end - offsets[packed_start].start
+                tokenized.token_ends[paragraph_end - 1]
+                - tokenized.token_starts[packed_start]
             )
 
             # If the combined range fits, retain it for possible further packing.
@@ -327,14 +345,16 @@ class ParagraphChunker:
             ):
                 packed_end = paragraph_end
             else:
-                spans.append(_span_from_tokens(text, offsets, packed_start, packed_end))
+                spans.append(
+                    _span_from_tokens(text, tokenized, packed_start, packed_end)
+                )
                 packed_start = paragraph_start
                 packed_end = paragraph_end
 
         # The loop emits a pack only when the next paragraph does not fit. Explicitly
         # emit the final accumulated pack after there is no next paragraph to trigger it.
         if packed_start is not None and packed_end is not None:
-            spans.append(_span_from_tokens(text, offsets, packed_start, packed_end))
+            spans.append(_span_from_tokens(text, tokenized, packed_start, packed_end))
 
         return spans
 
@@ -364,7 +384,7 @@ def get_chunker(strategy: ChunkingStrategy) -> Chunker:
 
 def _span_from_tokens(
     text: str,
-    offsets: tuple[TokenOffset, ...],
+    tokenized: TokenizedText,
     token_start: int,
     token_end: int,
 ) -> ChunkSpan:
@@ -377,7 +397,7 @@ def _span_from_tokens(
 
     Args:
         text: Complete canonical document text.
-        offsets: Ordered character ranges, one for each document token.
+        tokenized: Reusable start/end character arrays for all document tokens.
         token_start: Inclusive global token index.
         token_end: Exclusive global token index.
 
@@ -386,8 +406,8 @@ def _span_from_tokens(
     """
     # token_end is exclusive, so token_end - 1 is the final token included in the
     # chunk. The resulting character values use the same half-open convention.
-    character_start = offsets[token_start].start
-    character_end = offsets[token_end - 1].end
+    character_start = tokenized.token_starts[token_start]
+    character_end = tokenized.token_ends[token_end - 1]
 
     # Retain both coordinate systems so persistence and citation code can trace this
     # exact canonical slice without tokenizing the document again.
@@ -402,7 +422,7 @@ def _span_from_tokens(
 
 def _non_overlapping_token_spans(
     text: str,
-    offsets: tuple[TokenOffset, ...],
+    tokenized: TokenizedText,
     token_start: int,
     token_end: int,
     chunk_size: int,
@@ -415,7 +435,7 @@ def _non_overlapping_token_spans(
 
     Args:
         text: Complete canonical document text.
-        offsets: Ordered character ranges, one for each document token.
+        tokenized: Reusable start/end character arrays for all document tokens.
         token_start: Inclusive token index of the oversized unit.
         token_end: Exclusive token index of the oversized unit.
         chunk_size: Maximum tokens in each emitted window.
@@ -435,7 +455,7 @@ def _non_overlapping_token_spans(
 
         # Convert the token window to source text, then apply the separate safeguard
         # for an abnormally long tokenizer token.
-        span = _span_from_tokens(text, offsets, cursor, window_end)
+        span = _span_from_tokens(text, tokenized, cursor, window_end)
         spans.extend(_enforce_character_limit(text, span))
         cursor = window_end
 
@@ -512,7 +532,7 @@ def _character_fallback(text: str, start: int, end: int) -> list[ChunkSpan]:
 
 
 def _fit_character_limit(
-    offsets: tuple[TokenOffset, ...],
+    tokenized: TokenizedText,
     token_start: int,
     maximum_end: int,
 ) -> int:
@@ -524,7 +544,7 @@ def _fit_character_limit(
     too long, ``_enforce_character_limit`` later divides it by characters.
 
     Args:
-        offsets: Ordered character ranges, one for each document token.
+        tokenized: Reusable start/end character arrays for all document tokens.
         token_start: Inclusive candidate token start.
         maximum_end: Exclusive end imposed by the token limit.
 
@@ -532,12 +552,16 @@ def _fit_character_limit(
         Exclusive token end that advances by at least one token.
     """
     # Convert the relative character budget into an absolute document position.
-    character_limit = offsets[token_start].start + MAX_CHUNK_CHARACTERS
+    character_limit = tokenized.token_starts[token_start] + MAX_CHUNK_CHARACTERS
 
     # Search only within the current token-limited window so the fitted boundary can
     # never exceed maximum_end even if later tokens also fit the character position.
-    ends = [offset.end for offset in offsets]
-    fitted_end = bisect_right(ends, character_limit, token_start, maximum_end)
+    fitted_end = bisect_right(
+        tokenized.token_ends,
+        character_limit,
+        token_start,
+        maximum_end,
+    )
 
     # Force one-token progress when no whole token fits under the character limit.
     return max(token_start + 1, fitted_end)
@@ -545,7 +569,7 @@ def _fit_character_limit(
 
 def _collect_recursive_leaf_ends(
     text: str,
-    offsets: tuple[TokenOffset, ...],
+    tokenized: TokenizedText,
     token_start: int,
     token_end: int,
     chunk_size: int,
@@ -580,7 +604,7 @@ def _collect_recursive_leaf_ends(
 
     Args:
         text: Complete canonical document text.
-        offsets: Ordered character ranges, one for each document token.
+        tokenized: Reusable start/end character arrays for all document tokens.
         token_start: Inclusive token index of the current unit.
         token_end: Exclusive token index of the current unit.
         chunk_size: Maximum configured token count.
@@ -591,7 +615,9 @@ def _collect_recursive_leaf_ends(
     """
     # Calculate the source-character width covered by this token unit. Both the token
     # count and the character width must fit before the unit can remain whole.
-    characters = offsets[token_end - 1].end - offsets[token_start].start
+    characters = (
+        tokenized.token_ends[token_end - 1] - tokenized.token_starts[token_start]
+    )
 
     # Stop descending as soon as the current structural unit fits. For example, a
     # fitting paragraph remains one leaf instead of being needlessly split by sentence.
@@ -605,14 +631,14 @@ def _collect_recursive_leaf_ends(
 
     # Translate this token unit back to the exact canonical character region because
     # regular-expression separators operate on text rather than tokenizer indices.
-    character_start = offsets[token_start].start
-    character_end = offsets[token_end - 1].end
+    character_start = tokenized.token_starts[token_start]
+    character_end = tokenized.token_ends[token_end - 1]
 
     # Split with the current structural rule and map every content-bearing result back
     # into document-global token indices for the next recursive step.
     ranges = _token_ranges_for_split_text(
         text,
-        offsets,
+        tokenized,
         character_start,
         character_end,
         _RECURSIVE_SEPARATORS[separator_level],
@@ -623,7 +649,7 @@ def _collect_recursive_leaf_ends(
     if len(ranges) <= 1:
         return _collect_recursive_leaf_ends(
             text,
-            offsets,
+            tokenized,
             token_start,
             token_end,
             chunk_size,
@@ -638,7 +664,7 @@ def _collect_recursive_leaf_ends(
         leaf_ends.update(
             _collect_recursive_leaf_ends(
                 text,
-                offsets,
+                tokenized,
                 child_start,
                 child_end,
                 chunk_size,
@@ -651,7 +677,7 @@ def _collect_recursive_leaf_ends(
 
 def _token_ranges_for_split_text(
     text: str,
-    offsets: tuple[TokenOffset, ...],
+    tokenized: TokenizedText,
     character_start: int,
     character_end: int,
     separator: re.Pattern[str],
@@ -665,7 +691,7 @@ def _token_ranges_for_split_text(
 
     Args:
         text: Complete canonical document text.
-        offsets: Ordered character ranges, one for each document token.
+        tokenized: Reusable start/end character arrays for all document tokens.
         character_start: Inclusive region character offset.
         character_end: Exclusive region character offset.
         separator: Compiled expression identifying boundaries between text units.
@@ -685,7 +711,7 @@ def _token_ranges_for_split_text(
     # Then map every character piece to the token-index coordinate system used by the
     # chunking algorithms. The indices remain global to the complete document.
     for start, end in character_ranges:
-        token_range = _token_range_for_characters(offsets, start, end)
+        token_range = _token_range_for_characters(tokenized, start, end)
 
         # A half-open interval is non-empty only when start < end. Ignore separators or
         # unusual regions that contain no tokenizer-visible token.
@@ -740,7 +766,7 @@ def _split_character_ranges(
 
 
 def _token_range_for_characters(
-    offsets: tuple[TokenOffset, ...],
+    tokenized: TokenizedText,
     start: int,
     end: int,
 ) -> tuple[int, int]:
@@ -752,21 +778,17 @@ def _token_range_for_characters(
     form the smallest half-open token range covering all intersecting tokens.
 
     Args:
-        offsets: Ordered character ranges, one for each document token.
+        tokenized: Reusable start/end character arrays for all document tokens.
         start: Inclusive character boundary.
         end: Exclusive character boundary.
 
     Returns:
         ``(token_start, token_end)`` using inclusive/exclusive global indices.
     """
-    # Token start and end positions are monotonically ordered, which permits binary
-    # search instead of scanning every token for each paragraph or recursive unit.
-    token_ends = [offset.end for offset in offsets]
-    token_starts = [offset.start for offset in offsets]
-
     # Tokens ending exactly at start do not intersect [start, end), while tokens
     # starting exactly at end also do not intersect it. The bisect variants encode
-    # those half-open boundary rules and return token indices, not character offsets.
-    token_start = bisect_right(token_ends, start)
-    token_end = bisect_left(token_starts, end)
+    # those half-open boundary rules. Both searches reuse arrays created once during
+    # tokenization instead of rebuilding two document-sized lists for every text unit.
+    token_start = bisect_right(tokenized.token_ends, start)
+    token_end = bisect_left(tokenized.token_starts, end)
     return token_start, token_end

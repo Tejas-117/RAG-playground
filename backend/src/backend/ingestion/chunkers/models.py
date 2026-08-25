@@ -19,15 +19,80 @@ class TokenOffset:
     end: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class TokenizedText:
-    """Store the source offsets returned by one tokenizer encoding.
+    """Store reusable source-boundary arrays returned by one tokenizer encoding.
 
     Attributes:
-        offsets: Ordered source-text offsets for all non-special tokens.
+        token_starts: Ordered inclusive character starts for non-special tokens.
+        token_ends: Ordered exclusive character ends for non-special tokens.
+
+    ``offsets`` remains available as a compatibility view for injected tokenizers and
+    existing callers. Production chunking uses the parallel integer tuples directly,
+    avoiding one long-lived Python dataclass allocation for every document token.
     """
 
-    offsets: tuple[TokenOffset, ...]
+    token_starts: tuple[int, ...]
+    token_ends: tuple[int, ...]
+
+    def __init__(
+        self,
+        offsets: tuple[TokenOffset, ...] | None = None,
+        *,
+        token_starts: tuple[int, ...] | None = None,
+        token_ends: tuple[int, ...] | None = None,
+    ) -> None:
+        """Create token boundaries from legacy offsets or compact parallel arrays.
+
+        Args:
+            offsets: Optional legacy token-offset objects supplied by existing adapters.
+            token_starts: Optional compact inclusive character-start tuple.
+            token_ends: Optional compact exclusive character-end tuple.
+
+        Returns:
+            None. The frozen instance stores one validated pair of boundary tuples.
+
+        Raises:
+            ValueError: If both representations are supplied or lengths do not match.
+        """
+        # Legacy injected tokenizers still provide TokenOffset objects. Convert that
+        # representation once so all chunking helpers receive the same compact arrays.
+        if offsets is not None:
+            if token_starts is not None or token_ends is not None:
+                raise ValueError(
+                    "Provide offsets or token_starts/token_ends, not both."
+                )
+            resolved_starts = tuple(offset.start for offset in offsets)
+            resolved_ends = tuple(offset.end for offset in offsets)
+        else:
+            # Production tokenizers provide parallel arrays and avoid constructing a
+            # TokenOffset object for each token in a potentially very large document.
+            resolved_starts = token_starts or ()
+            resolved_ends = token_ends or ()
+
+        # Parallel tuples must describe the same number of tokens so any shared index
+        # safely addresses both the inclusive start and exclusive end of one token.
+        if len(resolved_starts) != len(resolved_ends):
+            raise ValueError("Token start and end arrays must have equal lengths.")
+
+        object.__setattr__(self, "token_starts", resolved_starts)
+        object.__setattr__(self, "token_ends", resolved_ends)
+
+    @property
+    def offsets(self) -> tuple[TokenOffset, ...]:
+        """Materialize the legacy object view only when a caller explicitly needs it.
+
+        Args:
+            None.
+
+        Returns:
+            Ordered TokenOffset objects corresponding to the compact boundary arrays.
+        """
+        # zip pairs matching positions; strict=True is safe after constructor validation.
+        return tuple(
+            TokenOffset(start=start, end=end)
+            for start, end in zip(self.token_starts, self.token_ends, strict=True)
+        )
 
 
 @dataclass(frozen=True)
@@ -58,13 +123,13 @@ class ChunkingTokenizer(Protocol):
     special_tokens_policy: str
 
     def encode(self, text: str) -> TokenizedText:
-        """Tokenize text and return offsets into the submitted string.
+        """Tokenize text and return reusable boundaries into the submitted string.
 
         Args:
             text: Unicode source text to measure.
 
         Returns:
-            Ordered non-special-token source offsets.
+            Ordered non-special-token source boundary arrays.
         """
         ...
 

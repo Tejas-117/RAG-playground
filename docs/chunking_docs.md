@@ -39,9 +39,9 @@ The process is:
    ready chunk set when that exact fingerprint has already been persisted.
 6. Pass each document's `normalized_text` to the selected chunker separately.
    The chunker returns exact text spans with character and token offsets.
-7. Convert each span into a persistable chunk. Assign its deterministic ID and
-   document-local ordinal, then derive its page and block provenance by offset
-   intersection.
+7. Build reusable page and block range indexes for the document. Convert each
+   span into a persistable chunk, assign its deterministic ID and document-local
+   ordinal, then derive provenance through indexed offset intersection.
 8. Persist the chunk set and all of its chunks in one SQLite transaction, then
    read the completed artifact through the repository boundary.
 9. Store the ready chunk-set ID and reuse flag on the run, then mark it
@@ -91,6 +91,34 @@ an enormous URL, identifier, or generated string. Such input is split at Python
 Unicode character boundaries. These fallback chunks retain exact character
 offsets but store token offsets as `NULL` because one tokenizer token was split.
 
+## Token-Boundary Representation and Performance
+
+The tokenizer encodes each document once per chunk-set build. Its output is kept
+as two parallel immutable tuples:
+
+```text
+token_starts[token_index] -> inclusive canonical character start
+token_ends[token_index]   -> exclusive canonical character end
+```
+
+Both tuples contain one integer per tokenizer-visible token. A token index can
+therefore retrieve both character boundaries without constructing a separate
+long-lived object for every token. A compatibility `offsets` view remains
+available for injected tokenizer adapters, but the production chunkers use the
+parallel tuples directly.
+
+Paragraph and recursive separators are discovered in character space and then
+mapped into token space. The token-start and token-end tuples are constructed
+once and reused by every mapping. Binary search finds the intersecting token
+range for each paragraph, sentence, line, or whitespace unit. The implementation
+does not rebuild document-sized boundary lists for each unit.
+
+Tokenization is not persisted in this implementation. A different chunking
+configuration or strategy therefore tokenizes the document again, while an
+identical configuration can reuse its complete fingerprinted chunk set. A
+persistent token-boundary artifact is deferred until measurements show that the
+remaining tokenizer cost warrants the additional storage lifecycle.
+
 ## Fixed-Size Strategy
 
 Fixed-size chunking encodes the document once and emits windows of
@@ -113,10 +141,11 @@ limits using this fallback order:
 paragraph -> sentence -> line -> whitespace/word -> token
 ```
 
-It greedily chooses the furthest discovered unit ending within the current token
-window. The next window begins at the prior token end minus the configured
-overlap. Endings prefer natural boundaries; an overlapped start may occur inside
-a sentence so the overlap remains exact.
+The discovered unit endings are sorted once. For each output window, binary
+search selects the furthest ending within the token and character limits instead
+of scanning all endings in the document. The next window begins at the prior
+token end minus the configured overlap. Endings prefer natural boundaries; an
+overlapped start may occur inside a sentence so the overlap remains exact.
 
 Sentence recognition includes `.`, `!`, `?`, `。`, `！`, and `？`, with or
 without following whitespace.
@@ -150,6 +179,12 @@ share at least one character:
 ```text
 chunk_start < source_end AND source_start < chunk_end
 ```
+
+Page and block ranges are indexed once for each document. Their ordered end
+offsets locate the first possible intersection through binary search, after
+which only nearby ranges are examined until the chunk end is reached. If legacy
+parse ranges are overlapping or out of order, provenance automatically uses the
+original full-scan rule so persisted results remain correct.
 
 Chunk boundaries are selected by the configured token or paragraph rules, not
 by source-layout boundaries. Therefore one chunk can intersect multiple pages

@@ -3,8 +3,10 @@
 import hashlib
 import json
 import sqlite3
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import pairwise
 from time import perf_counter
 from typing import Any
 from uuid import UUID, uuid5
@@ -36,6 +38,21 @@ class ChunkSetBuildResult:
 
     artifact: dict[str, Any]
     reused: bool
+
+
+@dataclass(frozen=True)
+class _SourceRangeIndex:
+    """Index ordered parse ranges for repeated chunk-provenance lookups.
+
+    Attributes:
+        records: Source page or block dictionaries in their persisted order.
+        end_offsets: Exclusive character ends matching the records by position.
+        supports_binary_search: Whether the ranges are ordered and non-overlapping.
+    """
+
+    records: tuple[dict[str, Any], ...]
+    end_offsets: tuple[int, ...]
+    supports_binary_search: bool
 
 
 class ChunkingCorpusNotFoundError(LookupError):
@@ -84,11 +101,7 @@ def build_or_reuse_chunk_set(
         EmptyChunkingCorpusError: If the corpus contains no documents.
         MissingParseArtifactError: If any document lacks canonical text.
     """
-
-    print("=============================== IN THE BUILD OR REUSE CHUNK SET FUNCTION ===============================")
-    print("=============================== LOADING CORPUS ===============================")
     corpus = load_corpus_chunking_inputs(corpus_id)
-    print(corpus)
 
     # Fail with a domain-specific error before tokenizer or persistence work begins.
     if corpus is None:
@@ -108,15 +121,8 @@ def build_or_reuse_chunk_set(
     if missing_parse_ids:
         raise MissingParseArtifactError(missing_parse_ids)
 
-    print("====================== RESOLVED TOKENIZER =======================")
     resolved_tokenizer = tokenizer or get_chunking_tokenizer()
-    print(resolved_tokenizer)
-
-    print("====================== RESOLVED CHUNKER =======================")
     chunker = get_chunker(config.strategy)
-    print(chunker)
-
-    print("====================== FINGERPRINT =======================")
     fingerprint = _build_fingerprint(
         corpus_id,
         documents,
@@ -125,8 +131,6 @@ def build_or_reuse_chunk_set(
         chunker.version,
         resolved_tokenizer,
     )
-    print(fingerprint)
-
 
     existing = get_ready_chunk_set(fingerprint)
 
@@ -141,9 +145,12 @@ def build_or_reuse_chunk_set(
 
     # Chunk each document independently so overlap never crosses a source boundary.
     for document in documents:
-        print("====================== STARTED CHUNKING =======================")
         spans = chunker.chunk(document["normalized_text"], config, resolved_tokenizer)
-        print(len(spans))
+
+        # Build each provenance index once per document. Every generated chunk reuses
+        # these indexes instead of scanning all pages and blocks from the beginning.
+        page_index = _build_source_range_index(document["pages"])
+        block_index = _build_source_range_index(document["blocks"])
 
         # Reset ordinals for each document while keeping globally stable chunk IDs.
         for ordinal, span in enumerate(spans):
@@ -153,6 +160,8 @@ def build_or_reuse_chunk_set(
                     document,
                     ordinal,
                     span,
+                    page_index,
+                    block_index,
                 )
             )
 
@@ -244,6 +253,8 @@ def _build_persistable_chunk(
     document: dict[str, Any],
     ordinal: int,
     span: ChunkSpan,
+    page_index: _SourceRangeIndex,
+    block_index: _SourceRangeIndex,
 ) -> dict[str, Any]:
     """Attach deterministic identity and source provenance to one chunk span.
 
@@ -252,6 +263,8 @@ def _build_persistable_chunk(
         document: Canonical source document and offset metadata.
         ordinal: Zero-based position within this source document.
         span: Exact canonical-text slice returned by a chunker.
+        page_index: Reusable index of the document's canonical page ranges.
+        block_index: Reusable index of the document's canonical block ranges.
 
     Returns:
         Dictionary ready for atomic SQLite persistence.
@@ -259,26 +272,19 @@ def _build_persistable_chunk(
     # Find every parsed page whose canonical character range overlaps this chunk.
     # A chunk can cross a page boundary because chunkers follow token or paragraph
     # limits, not page boundaries. These pages become the persisted citation range.
-    intersecting_pages = [
-        page
-        for page in document["pages"]
-        if _ranges_intersect(
-            span.character_start_offset,
-            span.character_end_offset,
-            page["character_start_offset"],
-            page["character_end_offset"],
-        )
-    ]
+    intersecting_pages = _find_intersecting_ranges(
+        page_index,
+        span.character_start_offset,
+        span.character_end_offset,
+    )
     # Find every parsed source block whose canonical character range overlaps this
     # chunk. Their ordinals preserve block-level provenance without copying block text.
     intersecting_blocks = [
         block["ordinal"]
-        for block in document["blocks"]
-        if _ranges_intersect(
+        for block in _find_intersecting_ranges(
+            block_index,
             span.character_start_offset,
             span.character_end_offset,
-            block["character_start_offset"],
-            block["character_end_offset"],
         )
     ]
     metadata = {
@@ -318,6 +324,95 @@ def _build_persistable_chunk(
         else None,
         "source_metadata_json": _canonical_json(metadata),
     }
+
+
+def _build_source_range_index(
+    source_ranges: list[dict[str, Any]],
+) -> _SourceRangeIndex:
+    """Prepare one ordered page or block collection for repeated range queries.
+
+    Args:
+        source_ranges: Persisted page or block dictionaries in canonical source order.
+
+    Returns:
+        Immutable records, end offsets, and whether binary search is safe to use.
+    """
+    records = tuple(source_ranges)
+    end_offsets = tuple(record["character_end_offset"] for record in records)
+
+    # Canonical pages and blocks are normally ordered, disjoint ranges. Verify that
+    # invariant once so unexpected legacy data can safely use the exact full-scan path.
+    valid_ranges = all(
+        record["character_start_offset"] <= record["character_end_offset"]
+        for record in records
+    )
+    ordered_ranges = all(
+        previous["character_end_offset"] <= current["character_start_offset"]
+        for previous, current in pairwise(records)
+    )
+    supports_binary_search = valid_ranges and ordered_ranges
+    return _SourceRangeIndex(
+        records=records,
+        end_offsets=end_offsets,
+        supports_binary_search=supports_binary_search,
+    )
+
+
+def _find_intersecting_ranges(
+    source_index: _SourceRangeIndex,
+    chunk_start: int,
+    chunk_end: int,
+) -> list[dict[str, Any]]:
+    """Return source ranges intersecting one half-open chunk character interval.
+
+    Args:
+        source_index: Reusable page or block range index for one document.
+        chunk_start: Inclusive character start of the generated chunk.
+        chunk_end: Exclusive character end of the generated chunk.
+
+    Returns:
+        Intersecting source records in their original persisted order.
+    """
+    # Unexpected overlapping or out-of-order legacy ranges cannot use a single binary
+    # search safely. Retain the previous full-scan semantics for those documents.
+    if not source_index.supports_binary_search:
+        return [
+            record
+            for record in source_index.records
+            if _ranges_intersect(
+                chunk_start,
+                chunk_end,
+                record["character_start_offset"],
+                record["character_end_offset"],
+            )
+        ]
+
+    # Ranges ending at chunk_start do not intersect a half-open chunk, so bisect_right
+    # skips them and positions the scan at the first possible overlapping source range.
+    first_candidate = bisect_right(source_index.end_offsets, chunk_start)
+    intersections: list[dict[str, Any]] = []
+
+    # Only inspect nearby ranges. Ordered ranges after chunk_end cannot intersect and
+    # let the loop stop without visiting the remainder of a large document's metadata.
+    for record_index in range(first_candidate, len(source_index.records)):
+        record = source_index.records[record_index]
+
+        # Ordered source starts permit an immediate stop after the chunk's exclusive
+        # end; no later record can move backward into the chunk.
+        if record["character_start_offset"] >= chunk_end:
+            break
+
+        # The binary search and stop boundary normally imply intersection. Keep the
+        # shared predicate here so zero-width or unusual legacy ranges remain exact.
+        if _ranges_intersect(
+            chunk_start,
+            chunk_end,
+            record["character_start_offset"],
+            record["character_end_offset"],
+        ):
+            intersections.append(record)
+
+    return intersections
 
 
 def _ranges_intersect(

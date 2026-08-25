@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tokenizers import Tokenizer
 
-from backend.ingestion.chunkers.models import TokenizedText, TokenOffset
+from backend.ingestion.chunkers.models import TokenizedText
 
 TOKENIZER_IDENTIFIER = "bert-base-multilingual-cased"
 TOKENIZER_REVISION = "0fcb34d393e71211e8d72b52c31a46e7b7597068"
@@ -69,13 +69,21 @@ class MultilingualBertTokenizer:
         """
         encoding = self._tokenizer.encode(text, add_special_tokens=False)
 
-        # Ignore zero-width entries defensively if a future tokenizer emits them.
-        offsets = tuple(
-            TokenOffset(start=start, end=end)
-            for start, end in encoding.offsets
-            if end > start
+        token_starts: list[int] = []
+        token_ends: list[int] = []
+
+        # Copy valid boundaries into compact parallel arrays. This avoids allocating a
+        # separate Python TokenOffset dataclass for every token in a large document.
+        for start, end in encoding.offsets:
+            # Ignore zero-width entries defensively if a future tokenizer emits them.
+            if end > start:
+                token_starts.append(start)
+                token_ends.append(end)
+
+        return TokenizedText(
+            token_starts=tuple(token_starts),
+            token_ends=tuple(token_ends),
         )
-        return TokenizedText(offsets=offsets)
 
 
 def _calculate_asset_digest(asset_path: Path) -> str:
