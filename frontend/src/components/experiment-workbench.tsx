@@ -12,6 +12,7 @@ import {
 import ExperimentInputControl, {
   type ExperimentInputMode,
 } from "@/components/experiment-input-control";
+import ExperimentRunModal from "@/components/experiment-run-modal";
 import MetricCheckboxGroup from "@/components/metric-checkbox-group";
 import NumberControl from "@/components/number-control";
 import SelectControl from "@/components/select-control";
@@ -19,13 +20,19 @@ import Toast from "@/components/toast";
 import WorkbenchGridCanvas from "@/components/workbench-grid-canvas";
 import WorkbenchSidebar from "@/components/workbench-sidebar";
 import apiClient, { isAxiosError, isCancel } from "@/lib/axios";
+import {
+  createCompletedExecution,
+  createFailedExecution,
+  createRunningExecution,
+  type RunExecutionView,
+} from "@/lib/run-execution";
 import { type CorpusOption, parseCorpora } from "@/validation/corpora";
 import {
   type PipelineOptions,
   parsePipelineOptions,
 } from "@/validation/pipeline-options";
 import {
-  parseRunApiError,
+  parseRunApiFailure,
   parseRunResponse,
   runCreateRequestSchema,
 } from "@/validation/runs";
@@ -140,6 +147,12 @@ export default function ExperimentWorkbench() {
   // Stores the latest run validation, persistence, or success notice.
   const [runNotice, setRunNotice] = useState<RunNotice | null>(null);
 
+  // Stores the backend-neutral execution state rendered below the configuration.
+  const [runExecution, setRunExecution] = useState<RunExecutionView | null>(null);
+
+  // Prevents duplicate submissions while the synchronous backend run is executing.
+  const [isRunSubmitting, setIsRunSubmitting] = useState(false);
+
   // Increments when the user asks to retry both initial API requests.
   const [loadAttempt, setLoadAttempt] = useState(0);
 
@@ -251,6 +264,9 @@ export default function ExperimentWorkbench() {
 
   // Indicates whether every required value for starting a run is present.
   const isRunReady = Boolean(configuration && selectedCorpusId && hasRunInput);
+
+  // Combines form readiness with request state for action styling and semantics.
+  const canStartRun = isRunReady && !isRunSubmitting;
 
   // Describes the selected generation model's provider-advertised token limits.
   let generationModelHelperText: string | undefined;
@@ -423,6 +439,11 @@ export default function ExperimentWorkbench() {
    * @returns A promise resolved after success or failure feedback is displayed.
    */
   async function handleRunExperiment(): Promise<void> {
+    // Ignore repeated clicks while the first request is still in flight.
+    if (isRunSubmitting) {
+      return;
+    }
+
     // Wait for the configuration catalog before allowing a run to proceed.
     if (!configuration) {
       setRunNotice({
@@ -438,6 +459,7 @@ export default function ExperimentWorkbench() {
         message: "Select a corpus before running the experiment.",
         type: "error",
       });
+      focusStage("Source");
       return;
     }
 
@@ -450,12 +472,19 @@ export default function ExperimentWorkbench() {
             : "Choose an evaluation dataset before running the experiment.",
         type: "error",
       });
+
+      // Focus the visible run input so the missing value can be corrected immediately.
+      const inputId = inputMode === "question" ? "experiment-question" : "evaluation-dataset";
+      document.getElementById(inputId)?.focus();
       return;
     }
 
     // Preserve the existing dataset behavior until a batch-runs endpoint is implemented.
     if (inputMode !== "question") {
-      setRunNotice(null);
+      setRunNotice({
+        message: "Evaluation dataset runs are not available yet.",
+        type: "error",
+      });
       return;
     }
 
@@ -498,31 +527,44 @@ export default function ExperimentWorkbench() {
       return;
     }
 
+    const selectedCorpusName =
+      corpora.find((corpus) => corpus.id === selectedCorpusId)?.name || corpusSearch.trim();
+
     setRunNotice(null);
+    setIsRunSubmitting(true);
+    setRunExecution(createRunningExecution(selectedCorpusName));
 
     try {
       const response = await apiClient.post<unknown>("/runs", requestResult.data);
       const persistedRun = parseRunResponse(response.data);
 
-      console.log(response.data)
+      setRunExecution(createCompletedExecution(persistedRun, selectedCorpusName));
 
       setRunNotice({
-        message: `Run ${persistedRun.id} was saved.`,
+        message: `Run ${persistedRun.id} completed chunking.`,
         type: "success",
       });
     } catch (error) {
-      // Prefer stable API messages while retaining a safe fallback for transport failures.
-      const apiMessage = isAxiosError(error)
-        ? parseRunApiError(error.response?.data)
+      // Prefer structured API details while retaining a safe fallback for transport failures.
+      const apiFailure = isAxiosError(error)
+        ? parseRunApiFailure(error.response?.data)
         : null;
+      const failure = apiFailure ?? {
+        message:
+          error instanceof Error
+            ? error.message
+            : "The experiment run could not be saved.",
+      };
+
+      setRunExecution(createFailedExecution(failure, selectedCorpusName));
 
       setRunNotice({
-        message: apiMessage ??
-          (error instanceof Error
-            ? error.message
-            : "The experiment run could not be saved."),
+        message: failure.message,
         type: "error",
       });
+    } finally {
+      // Restore both Run buttons after either a successful response or a failure.
+      setIsRunSubmitting(false);
     }
   }
 
@@ -599,20 +641,31 @@ export default function ExperimentWorkbench() {
 
             {/* The primary action explains any missing requirement when pressed. */}
             <button
-              aria-disabled={!isRunReady}
+              aria-disabled={!canStartRun}
               className={`
                 inline-flex shrink-0 items-center gap-2 rounded
                 bg-[var(--charcoal)] px-4 py-2.5 text-sm font-semibold
                 text-[var(--white)] transition-colors hover:bg-[var(--primary-hover)]
                 focus-visible:outline-none focus-visible:ring-2
                 focus-visible:ring-[var(--charcoal)] focus-visible:ring-offset-2
-                ${isRunReady ? "" : "cursor-not-allowed opacity-45"}
+                ${canStartRun ? "" : "cursor-not-allowed opacity-45"}
               `}
+              disabled={isRunSubmitting}
               onClick={handleRunExperiment}
               type="button"
             >
-              <FiPlay aria-hidden="true" className="size-4" />
-              Run experiment
+              {isRunSubmitting ? (
+                <span
+                  aria-hidden="true"
+                  className={`
+                    run-status-spinner size-4 rounded-full border-2
+                    border-white/35 border-t-white
+                  `}
+                />
+              ) : (
+                <FiPlay aria-hidden="true" className="size-4" />
+              )}
+              {isRunSubmitting ? "Running experiment…" : "Run experiment"}
             </button>
           </header>
 
@@ -1235,11 +1288,11 @@ export default function ExperimentWorkbench() {
                     `}
                   >
                     <p className="max-w-md text-xs leading-5 text-[var(--muted-text)]">
-                      Saving keeps this exact question and configuration for future pipeline
-                      execution.
+                      Each run keeps this exact question and configuration attached to its
+                      results.
                     </p>
                     <button
-                      aria-disabled={!isRunReady}
+                      aria-disabled={!canStartRun}
                       className={`
                         inline-flex items-center gap-2 rounded bg-[var(--charcoal)]
                         px-4 py-2.5 text-sm font-semibold text-[var(--white)]
@@ -1247,21 +1300,43 @@ export default function ExperimentWorkbench() {
                         focus-visible:outline-none focus-visible:ring-2
                         focus-visible:ring-[var(--charcoal)]
                         focus-visible:ring-offset-2
-                        ${isRunReady ? "" : "cursor-not-allowed opacity-45"}
+                        ${canStartRun ? "" : "cursor-not-allowed opacity-45"}
                       `}
+                      disabled={isRunSubmitting}
                       onClick={handleRunExperiment}
                       type="button"
                     >
-                      <FiPlay aria-hidden="true" className="size-4" />
-                      Run experiment
+                      {isRunSubmitting ? (
+                        <span
+                          aria-hidden="true"
+                          className={`
+                            run-status-spinner size-4 rounded-full border-2
+                            border-white/35 border-t-white
+                          `}
+                        />
+                      ) : (
+                        <FiPlay aria-hidden="true" className="size-4" />
+                      )}
+                      {isRunSubmitting ? "Running experiment…" : "Run experiment"}
                     </button>
                   </div>
+
                 </>
               )}
             </div>
           </div>
         </div>
       </WorkbenchGridCanvas>
+
+      {/* The execution modal isolates live pipeline feedback from editable configuration. */}
+      {runExecution ? (
+        <ExperimentRunModal
+          execution={runExecution}
+          isRetrying={isRunSubmitting}
+          onClose={() => setRunExecution(null)}
+          onRetry={handleRunExperiment}
+        />
+      ) : null}
 
       {/* The run notice reports validation and persistence outcomes. */}
       {runNotice ? (

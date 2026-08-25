@@ -34,10 +34,23 @@ export const runCreateRequestSchema = z.object({
   configuration: pipelineConfigurationSchema,
 });
 
-/** Runtime contract for a persisted run returned by POST /runs. */
+/** Runtime contract for the ready chunk artifact returned by the current pipeline. */
+const runChunkingResponseSchema = z.object({
+  chunk_set_id: z.string().min(1),
+  status: z.literal("ready"),
+  chunk_count: z.number().int().nonnegative(),
+  reused: z.boolean(),
+});
+
+/** Runtime contract for a completed run returned by POST /runs. */
 const runResponseSchema = runCreateRequestSchema.extend({
   id: z.string().min(1),
+  status: z.literal("completed"),
   created_at: z.string().min(1),
+  started_at: z.string().min(1),
+  completed_at: z.string().min(1),
+  duration_ms: z.number().int().nonnegative(),
+  chunking: runChunkingResponseSchema,
 });
 
 /** Structured error detail returned by application-level FastAPI failures. */
@@ -46,8 +59,17 @@ const runApiErrorSchema = z.object({
     code: z.string().min(1),
     message: z.string().min(1),
     field: z.string().min(1).optional(),
+    run_id: z.string().min(1).optional(),
+    stage: z.string().min(1).optional(),
   }),
 });
+
+/** Safe application-level failure details that the run UI may display. */
+export type RunApiFailure = {
+  message: string;
+  runId?: string;
+  stage?: string;
+};
 
 /** A validated request payload inferred from the public runtime contract. */
 export type RunCreateRequest = z.infer<typeof runCreateRequestSchema>;
@@ -88,4 +110,25 @@ export function parseRunApiError(value: unknown): string | null {
   }
 
   return result.data.detail.message;
+}
+
+/**
+ * Extracts safe execution details from an application-level run failure.
+ *
+ * @param value - Untrusted error response body received from the backend.
+ * @returns Display-safe failure details when valid, otherwise null.
+ */
+export function parseRunApiFailure(value: unknown): RunApiFailure | null {
+  const result = runApiErrorSchema.safeParse(value);
+
+  // Reject malformed failures instead of exposing unvalidated response values.
+  if (!result.success) {
+    return null;
+  }
+
+  return {
+    message: result.data.detail.message,
+    runId: result.data.detail.run_id,
+    stage: result.data.detail.stage,
+  };
 }
