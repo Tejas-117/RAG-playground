@@ -94,6 +94,13 @@ The MVP language should remain simple: users should understand the effect of str
 
 The backend validates compatibility before building an index. It must not silently reuse an incompatible index.
 
+The first adapter calls Ollama's `/api/embed` HTTP endpoint. The backend does
+not install, pull, inspect, or start models. `OLLAMA_BASE_URL` may point to a
+local or remote service. Provider and model failures are recorded on the run,
+and future providers can implement the same backend-neutral adapter contract.
+Chroma stores the explicit vectors locally; it never chooses or invokes the
+embedding model.
+
 ### Reserved for Later Versions
 
 - Vector-store selection beyond Chroma.

@@ -82,3 +82,4 @@ yarn-error.log*
 others/
 uploads/
 backend/*.sqlite3
+backend/chroma_data/

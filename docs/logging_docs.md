@@ -55,11 +55,22 @@ Chunking emits:
 Pipeline execution emits:
 
 - `pipeline_run_requested`
-- `pipeline_run_created`
+- `pipeline_run_enqueued`
+- `pipeline_worker_started`
+- `pipeline_worker_run_claimed`
 - `pipeline_run_started`
+- `pipeline_run_stage_completed`
 - `pipeline_run_completed`
 - `pipeline_run_rejected`, `pipeline_run_stage_failed`, or
-  `pipeline_run_failed`
+  `pipeline_worker_run_failed`
+
+Embedding and vector indexing emit:
+
+- `vector_index_requested`
+- `vector_index_build_started`
+- `vector_index_completed`
+- `vector_index_reused` or `vector_index_reused_after_race`
+- `vector_index_build_failed`
 
 Normal lifecycle transitions use `INFO`. Invalid input and expected rejected
 operations use `WARNING`. Unexpected operational failures use `ERROR` with an
@@ -69,10 +80,11 @@ exception traceback.
 
 Stage logs contain bounded operational fields such as:
 
-- corpus, document, run, and chunk-set IDs;
+- corpus, document, run, chunk-set, and vector-index IDs;
 - safely represented filenames;
 - parser and chunking strategy names;
 - file, character, page, block, warning, and chunk counts;
+- provider/model identifiers, vector counts and dimensions;
 - stage durations and artifact reuse decisions; and
 - stable error codes.
 

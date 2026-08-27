@@ -1,4 +1,4 @@
-"""API tests for immutable single-question pipeline run persistence."""
+"""API and executor tests for queued immutable pipeline runs."""
 
 import json
 import re
@@ -12,14 +12,23 @@ from httpx import ASGITransport, AsyncClient, Response
 
 from backend.app import app
 from backend.db.connection import connect
-from backend.db.repositories.runs import InvalidRunStateError, complete_run
+from backend.db.repositories.runs import (
+    InvalidRunStateError,
+    claim_next_pending_run,
+    complete_run,
+)
+from backend.embedding.models import (
+    EmbeddingBatch,
+    EmbeddingInputPurpose,
+    EmbeddingProviderUnavailableError,
+)
 from backend.ingestion.chunkers.models import TokenizedText, TokenOffset
 from backend.ingestion.chunkers.tokenizer import TokenizerAssetError
-from backend.pipeline.execution import PipelineExecutor, get_pipeline_executor
+from backend.pipeline.execution import PipelineExecutor, PipelineRunExecutionError
 
 
 class RunTestTokenizer:
-    """Provide deterministic offline token offsets to API execution tests."""
+    """Provide deterministic offline token offsets to pipeline execution tests."""
 
     identifier = "run-test-tokenizer"
     revision = "1"
@@ -63,6 +72,158 @@ class UnavailableRunTestTokenizer(RunTestTokenizer):
         raise TokenizerAssetError("simulated missing tokenizer")
 
 
+class RunTestEmbeddingProvider:
+    """Return deterministic fixed-width vectors without a network call."""
+
+    identifier = "run-test-embedding-provider"
+    version = "1"
+
+    def input_policy_version(self, model: str) -> str:
+        """Return the stable text policy used by this fake provider.
+
+        Args:
+            model: Provider model identifier selected by the run.
+
+        Returns:
+            Fixed fake policy version.
+        """
+        # Every fake model uses the same unmodified text policy.
+        return "raw-test-v1"
+
+    def embed(
+        self,
+        model: str,
+        texts: list[str],
+        purpose: EmbeddingInputPurpose,
+    ) -> EmbeddingBatch:
+        """Create one deterministic three-dimensional vector per text.
+
+        Args:
+            model: Provider model identifier selected by the run.
+            texts: Ordered chunk texts being embedded.
+            purpose: Document or query purpose for the request.
+
+        Returns:
+            Three-dimensional vectors aligned with the submitted texts.
+        """
+        # Text length keeps vectors deterministic while purpose verifies the interface.
+        purpose_coordinate = 1.0 if purpose is EmbeddingInputPurpose.DOCUMENT else 2.0
+        vectors = tuple(
+            (float(len(text)), float(index + 1), purpose_coordinate)
+            for index, text in enumerate(texts)
+        )
+        return EmbeddingBatch(
+            vectors=vectors,
+            dimensions=3,
+            provider_model=model,
+            provider_revision="test-revision",
+        )
+
+
+class UnavailableRunTestEmbeddingProvider(RunTestEmbeddingProvider):
+    """Simulate an embedding HTTP service that cannot be reached."""
+
+    def embed(
+        self,
+        model: str,
+        texts: list[str],
+        purpose: EmbeddingInputPurpose,
+    ) -> EmbeddingBatch:
+        """Raise the provider-neutral unavailability failure.
+
+        Args:
+            model: Provider model identifier selected by the run.
+            texts: Ordered chunk texts that cannot be embedded.
+            purpose: Document or query purpose for the request.
+
+        Returns:
+            Never returns because the fake service is unavailable.
+
+        Raises:
+            EmbeddingProviderUnavailableError: Always.
+        """
+        # The executor must persist a safe error rather than expose transport internals.
+        raise EmbeddingProviderUnavailableError("simulated connection failure")
+
+
+class RunTestVectorStore:
+    """Persist explicit vectors in memory for deterministic executor tests."""
+
+    identifier = "run-test-vector-store"
+    version = "1"
+
+    def __init__(self) -> None:
+        """Create the isolated in-memory collection registry.
+
+        Args:
+            None.
+
+        Returns:
+            None. The store begins with no collections.
+        """
+        self.collections: dict[str, dict[str, list[object]]] = {}
+
+    def create_collection(self, name: str, distance_metric: str) -> None:
+        """Create one empty named test collection.
+
+        Args:
+            name: Unique collection identifier.
+            distance_metric: Configured distance metric retained by production only.
+
+        Returns:
+            None. An empty collection is registered.
+        """
+        # Keep only record arrays required to verify aligned writes and counts.
+        self.collections[name] = {"ids": [], "vectors": [], "metadata": []}
+
+    def add(
+        self,
+        collection_name: str,
+        ids: list[str],
+        vectors: list[list[float]],
+        metadata: list[dict[str, str | int | float | bool]],
+    ) -> None:
+        """Append one aligned vector batch to the named collection.
+
+        Args:
+            collection_name: Existing collection receiving records.
+            ids: Stable chunk identifiers.
+            vectors: Explicit provider-generated vectors.
+            metadata: Scalar provenance aligned with the identifiers.
+
+        Returns:
+            None. Records are retained in memory.
+        """
+        collection = self.collections[collection_name]
+        collection["ids"].extend(ids)
+        collection["vectors"].extend(vectors)
+        collection["metadata"].extend(metadata)
+
+    def count(self, collection_name: str) -> int:
+        """Return the number of vector identifiers in one collection.
+
+        Args:
+            collection_name: Existing collection to inspect.
+
+        Returns:
+            Number of stored records.
+        """
+        # IDs are the authoritative one-to-one vector record identity.
+        return len(self.collections[collection_name]["ids"])
+
+    def delete_collection(self, name: str) -> None:
+        """Delete one test collection during rollback or reuse races.
+
+        Args:
+            name: Exact collection identifier to remove.
+
+        Returns:
+            None. A missing collection is treated as already removed.
+        """
+        # Match the production adapter's idempotent cleanup behavior.
+        self.collections.pop(name, None)
+
+
 def _run_payload() -> dict[str, object]:
     """Create a valid request using defaults for optional pipeline settings.
 
@@ -92,16 +253,16 @@ def _run_payload() -> dict[str, object]:
 
 
 class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
-    """Exercise the public single-question run endpoint with isolated SQLite data."""
+    """Exercise queue, polling, and execution with isolated SQLite data."""
 
     def setUp(self) -> None:
-        """Create and patch an isolated SQLite database for one test.
+        """Create isolated persistence and deterministic pipeline adapters.
 
         Args:
             None.
 
         Returns:
-            None. The test instance owns the temporary database until teardown.
+            None. Temporary resources remain owned until teardown.
         """
         # Redirect repository connections away from the developer's local database.
         self.database_directory = TemporaryDirectory()
@@ -111,8 +272,12 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
             self.database_path,
         )
         self.database_patch.start()
-        self.executor = PipelineExecutor(tokenizer=RunTestTokenizer())
-        app.dependency_overrides[get_pipeline_executor] = self._get_executor
+        self.vector_store = RunTestVectorStore()
+        self.executor = PipelineExecutor(
+            tokenizer=RunTestTokenizer(),
+            embedding_provider=RunTestEmbeddingProvider(),
+            vector_store=self.vector_store,
+        )
 
         # Seed one immutable corpus and completed canonical parse for valid runs.
         with connect() as connection:
@@ -134,7 +299,7 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
                     "refunds.txt",
                     "uploads/refunds.txt",
                     "text/plain",
-                    42,
+                    48,
                     "a" * 64,
                     "2026-08-02T00:00:01Z",
                 ),
@@ -162,18 +327,6 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-    def _get_executor(self) -> PipelineExecutor:
-        """Return the deterministic executor used by this isolated API test.
-
-        Args:
-            None.
-
-        Returns:
-            Pipeline executor configured with the offline test tokenizer.
-        """
-        # FastAPI dependency overrides call this method for every test request.
-        return self.executor
-
     def tearDown(self) -> None:
         """Restore the database path and remove temporary test data.
 
@@ -183,293 +336,135 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
         Returns:
             None. Resources created by setup are released.
         """
-        # Restore the production dependency before releasing the isolated database.
-        app.dependency_overrides.pop(get_pipeline_executor, None)
-
         # Stop patching before deleting the temporary directory it references.
         self.database_patch.stop()
         self.database_directory.cleanup()
 
-    async def _post_run(self, payload: dict[str, object]) -> Response:
-        """Submit a run request through the complete FastAPI application.
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, object] | None = None,
+    ) -> Response:
+        """Send one request through the complete FastAPI application.
 
         Args:
-            payload: JSON-compatible request body sent to the runs endpoint.
+            method: HTTP method used for the request.
+            path: Application-relative route path.
+            payload: Optional JSON-compatible request body.
 
         Returns:
-            The HTTPX response returned by the application.
+            HTTPX response returned by the application.
         """
         transport = ASGITransport(app=app)
 
-        # Use an in-process ASGI client so tests remain fast and offline.
+        # Use an in-process client so API contract tests remain fast and offline.
         async with AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
+            transport=transport, base_url="http://testserver"
         ) as client:
-            return await client.post("/runs", json=payload)
+            return await client.request(method, path, json=payload)
 
-    async def test_create_run_saves_trimmed_question_and_resolved_defaults(
-        self,
-    ) -> None:
-        """Verify a valid request stores its normalized immutable snapshot.
+    def _execute_next_run(self) -> dict[str, object]:
+        """Claim and synchronously execute the oldest pending test run.
 
         Args:
             None.
 
         Returns:
-            None. Assertions verify the API response and SQLite row.
+            Completed run produced by the deterministic executor.
         """
-        response = await self._post_run(_run_payload())
+        claimed_run = claim_next_pending_run()
 
-        # Confirm creation returns the normalized question and backend defaults.
-        self.assertEqual(response.status_code, 201)
-        response_data = response.json()
-        self.assertEqual(response_data["question"], "What is the refund policy?")
-        self.assertEqual(response_data["status"], "completed")
-        self.assertEqual(response_data["chunking"]["status"], "ready")
-        self.assertGreater(response_data["chunking"]["chunk_count"], 0)
-        self.assertFalse(response_data["chunking"]["reused"])
-        self.assertEqual(response_data["configuration"]["retrieval"]["top_k"], 10)
+        # A test calling this helper must have enqueued exactly one available run.
+        self.assertIsNotNone(claimed_run)
+        return self.executor.execute(claimed_run["id"])
+
+    async def test_enqueue_and_poll_completed_run(self) -> None:
+        """Verify queued creation and completed chunk/vector provenance.
+
+        Args:
+            None.
+
+        Returns:
+            None. Assertions verify both API lifecycle representations.
+        """
+        enqueue_response = await self._request("POST", "/runs", _run_payload())
+
+        # Enqueueing returns immediately with resolved immutable configuration.
+        self.assertEqual(enqueue_response.status_code, 202)
+        pending_run = enqueue_response.json()
+        self.assertEqual(pending_run["question"], "What is the refund policy?")
+        self.assertEqual(pending_run["status"], "pending")
+        self.assertEqual(pending_run["chunking"]["status"], "pending")
+        self.assertEqual(pending_run["embedding"]["status"], "pending")
+        self.assertEqual(pending_run["configuration"]["retrieval"]["top_k"], 10)
+
+        self._execute_next_run()
+        poll_response = await self._request("GET", f"/runs/{pending_run['id']}")
+        completed_run = poll_response.json()
+
+        # Polling exposes both exact reusable artifacts only after they are ready.
+        self.assertEqual(poll_response.status_code, 200)
+        self.assertEqual(completed_run["status"], "completed")
+        self.assertEqual(completed_run["chunking"]["status"], "completed")
+        self.assertGreater(completed_run["chunking"]["chunk_count"], 0)
+        self.assertEqual(completed_run["embedding"]["status"], "completed")
+        self.assertEqual(completed_run["embedding"]["dimensions"], 3)
         self.assertEqual(
-            response_data["configuration"]["generation"]["max_output_tokens"],
-            1000,
-        )
-        self.assertEqual(
-            response_data["configuration"]["evaluation"],
-            {"retrieval_metrics": [], "answer_metrics": []},
+            completed_run["embedding"]["vector_count"],
+            completed_run["chunking"]["chunk_count"],
         )
 
-        # Read the stored JSON to confirm persistence matches the response snapshot.
+        # The saved snapshot must exactly match the resolved API configuration.
         with sqlite3.connect(self.database_path) as connection:
             row = connection.execute(
                 "SELECT question, effective_config_json FROM pipeline_run"
             ).fetchone()
 
-        self.assertIsNotNone(row)
         self.assertEqual(row[0], "What is the refund policy?")
-        self.assertEqual(json.loads(row[1]), response_data["configuration"])
+        self.assertEqual(json.loads(row[1]), completed_run["configuration"])
 
-    async def test_create_run_saves_complete_frontend_configuration(self) -> None:
-        """Verify the complete frontend payload is persisted as the run snapshot.
-
-        Args:
-            None.
-
-        Returns:
-            None. Assertions verify the response and database contain the UI selections.
-        """
-        payload = {
-            "corpus_id": "corpus-1",
-            "question": "How long do refunds take?",
-            "configuration": {
-                "chunking": {
-                    "strategy": "recursive",
-                    "chunk_size_tokens": 800,
-                    "chunk_overlap_tokens": 100,
-                },
-                "embedding": {
-                    "provider": "ollama",
-                    "model": "all-minilm",
-                    "distance_metric": "cosine",
-                },
-                "retrieval": {"top_k": 10},
-                "generation": {
-                    "provider": "ollama",
-                    "model": "llama3.2:3b",
-                    "temperature": 0.2,
-                    "max_output_tokens": 1000,
-                },
-                "evaluation": {
-                    "retrieval_metrics": [],
-                    "answer_metrics": ["groundedness", "answer_relevance"],
-                },
-            },
-        }
-
-        response = await self._post_run(payload)
-
-        # Verify FastAPI accepted and returned every selection submitted by the UI.
-        self.assertEqual(response.status_code, 201)
-        response_data = response.json()
-        self.assertEqual(response_data["configuration"], payload["configuration"])
-
-        with sqlite3.connect(self.database_path) as connection:
-            stored_row = connection.execute(
-                "SELECT corpus_id, question, effective_config_json FROM pipeline_run"
-            ).fetchone()
-
-        # Confirm the immutable SQLite row matches the selected source, question, and config.
-        self.assertIsNotNone(stored_row)
-        self.assertEqual(stored_row[0], payload["corpus_id"])
-        self.assertEqual(stored_row[1], payload["question"])
-        self.assertEqual(json.loads(stored_row[2]), payload["configuration"])
-
-    async def test_completed_run_rejects_second_completion(self) -> None:
-        """Verify terminal run history cannot be overwritten by a retry.
+    async def test_poll_rejects_unknown_run(self) -> None:
+        """Verify polling an unknown stable ID returns a structured 404.
 
         Args:
             None.
 
         Returns:
-            None. Assertions verify the repository lifecycle guard.
+            None. Assertions verify the public not-found contract.
         """
-        response = await self._post_run(_run_payload())
-        response_data = response.json()
+        response = await self._request("GET", "/runs/missing-run")
 
-        # Repeating a terminal transition must fail instead of mutating history.
-        with self.assertRaises(InvalidRunStateError):
-            complete_run(
-                response_data["id"],
-                response_data["chunking"]["chunk_set_id"],
-                True,
-                1,
-            )
-
-    async def test_create_run_rejects_blank_question(self) -> None:
-        """Verify whitespace-only questions produce a structured validation error.
-
-        Args:
-            None.
-
-        Returns:
-            None. Assertions verify no unusable run is accepted.
-        """
-        payload = _run_payload()
-        payload["question"] = "   "
-        response = await self._post_run(payload)
-
-        # Require the stable error contract used by the frontend.
-        self.assertEqual(response.status_code, 422)
-        self.assertEqual(
-            response.json()["detail"],
-            {
-                "code": "invalid_question",
-                "message": "Question must not be blank.",
-            },
-        )
-
-    async def test_create_run_rejects_unknown_corpus(self) -> None:
-        """Verify a run cannot reference a corpus that does not exist.
-
-        Args:
-            None.
-
-        Returns:
-            None. Assertions verify the structured not-found response.
-        """
-        payload = _run_payload()
-        payload["corpus_id"] = "missing-corpus"
-        response = await self._post_run(payload)
-
-        # Distinguish a missing corpus from general persistence failures.
+        # Keep missing run identity distinct from provider or execution failures.
         self.assertEqual(response.status_code, 404)
-        self.assertEqual(response.json()["detail"]["code"], "corpus_not_found")
+        self.assertEqual(response.json()["detail"]["code"], "run_not_found")
 
-    async def test_create_run_records_missing_parse_failure(self) -> None:
-        """Verify incomplete canonical inputs leave one structured failed run.
-
-        Args:
-            None.
-
-        Returns:
-            None. Assertions verify the API error and persisted lifecycle state.
-        """
-        # Remove only the parse so the selected corpus remains valid but unchunkable.
-        with connect() as connection:
-            connection.execute("DELETE FROM document_parse WHERE id = ?", ("parse-1",))
-
-        response = await self._post_run(_run_payload())
-
-        # The failure identifies both the auditable run and repairable document.
-        self.assertEqual(response.status_code, 409)
-        detail = response.json()["detail"]
-        self.assertEqual(detail["code"], "missing_parse_artifact")
-        self.assertEqual(detail["document_ids"], ["document-1"])
-
-        with sqlite3.connect(self.database_path) as connection:
-            failed_run = connection.execute(
-                """
-                SELECT id, status, chunk_set_id, error_code
-                FROM pipeline_run
-                """
-            ).fetchone()
-
-        self.assertEqual(failed_run[0], detail["run_id"])
-        self.assertEqual(failed_run[1:], ("failed", None, "missing_parse_artifact"))
-
-    async def test_create_run_records_empty_corpus_failure(self) -> None:
-        """Verify a known corpus without documents becomes a failed run.
+    async def test_enqueue_rejects_invalid_inputs(self) -> None:
+        """Verify blank questions and unknown corpora never enter the queue.
 
         Args:
             None.
 
         Returns:
-            None. Assertions verify conflict transport and auditable failure state.
+            None. Assertions verify request-level error categories.
         """
-        # Insert a valid immutable corpus that intentionally has no document rows.
-        with connect() as connection:
-            connection.execute(
-                "INSERT INTO corpus VALUES (?, ?, ?, ?, ?)",
-                (
-                    "empty-corpus",
-                    "Empty corpus",
-                    None,
-                    "2026-08-02T00:00:00Z",
-                    "2026-08-02T00:00:00Z",
-                ),
-            )
+        blank_payload = _run_payload()
+        blank_payload["question"] = "   "
+        blank_response = await self._request("POST", "/runs", blank_payload)
+        missing_payload = _run_payload()
+        missing_payload["corpus_id"] = "missing-corpus"
+        missing_response = await self._request("POST", "/runs", missing_payload)
 
-        payload = _run_payload()
-        payload["corpus_id"] = "empty-corpus"
-        response = await self._post_run(payload)
-
-        # A known but unusable corpus is a state conflict rather than a not-found error.
-        self.assertEqual(response.status_code, 409)
-        detail = response.json()["detail"]
-        self.assertEqual(detail["code"], "empty_corpus")
-
-        with sqlite3.connect(self.database_path) as connection:
-            failed_run = connection.execute(
-                """
-                SELECT status, error_code
-                FROM pipeline_run
-                WHERE id = ?
-                """,
-                (detail["run_id"],),
-            ).fetchone()
-
-        self.assertEqual(failed_run, ("failed", "empty_corpus"))
-
-    async def test_create_run_records_tokenizer_failure(self) -> None:
-        """Verify tokenizer asset failures are sanitized and persisted.
-
-        Args:
-            None.
-
-        Returns:
-            None. Assertions verify safe transport and database failure records.
-        """
-        # Replace the normal offline tokenizer with a deterministic failing adapter.
-        self.executor = PipelineExecutor(tokenizer=UnavailableRunTestTokenizer())
-        response = await self._post_run(_run_payload())
-
-        # Internal asset details must not leak through the structured API response.
-        self.assertEqual(response.status_code, 500)
-        detail = response.json()["detail"]
-        self.assertEqual(detail["code"], "chunking_tokenizer_unavailable")
-        self.assertNotIn("simulated", detail["message"])
-
-        with sqlite3.connect(self.database_path) as connection:
-            failed_run = connection.execute(
-                "SELECT status, error_code FROM pipeline_run"
-            ).fetchone()
-
+        # Neither invalid request should create an auditable execution row.
+        self.assertEqual(blank_response.status_code, 422)
+        self.assertEqual(blank_response.json()["detail"]["code"], "invalid_question")
+        self.assertEqual(missing_response.status_code, 404)
         self.assertEqual(
-            failed_run,
-            ("failed", "chunking_tokenizer_unavailable"),
+            missing_response.json()["detail"]["code"],
+            "corpus_not_found",
         )
 
-    async def test_create_run_rejects_unsupported_provider(self) -> None:
+    async def test_enqueue_rejects_unsupported_provider(self) -> None:
         """Verify the backend catalog controls executable provider identifiers.
 
         Args:
@@ -481,9 +476,9 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
         payload = _run_payload()
         configuration = payload["configuration"]
         configuration["embedding"]["provider"] = "unknown"
-        response = await self._post_run(payload)
+        response = await self._request("POST", "/runs", payload)
 
-        # Return the incompatible field through a stable machine-readable error.
+        # Reject an unregistered adapter before persisting an unusable run.
         self.assertEqual(response.status_code, 422)
         self.assertEqual(
             response.json()["detail"],
@@ -494,134 +489,144 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_create_run_saves_multiple_answer_metrics(self) -> None:
-        """Verify one run snapshot retains every selected answer metric.
+    async def test_chunking_failure_is_persisted_for_polling(self) -> None:
+        """Verify missing canonical input becomes a safe terminal run failure.
 
         Args:
             None.
 
         Returns:
-            None. Assertions verify multi-metric API and persistence behavior.
+            None. Assertions verify stage state and structured error provenance.
         """
-        payload = _run_payload()
-        configuration = payload["configuration"]
-        configuration["evaluation"] = {
-            "retrieval_metrics": [],
-            "answer_metrics": ["groundedness", "answer_relevance"],
-        }
-        response = await self._post_run(payload)
+        # Remove only the parse so the selected corpus remains valid but unchunkable.
+        with connect() as connection:
+            connection.execute("DELETE FROM document_parse WHERE id = ?", ("parse-1",))
 
-        # Return both compatible metrics in the immutable effective configuration.
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(
-            response.json()["configuration"]["evaluation"]["answer_metrics"],
-            ["groundedness", "answer_relevance"],
-        )
+        enqueue_response = await self._request("POST", "/runs", _run_payload())
+        run_id = enqueue_response.json()["id"]
+        claimed_run = claim_next_pending_run()
 
-        with sqlite3.connect(self.database_path) as connection:
-            stored_configuration = connection.execute(
-                "SELECT effective_config_json FROM pipeline_run"
-            ).fetchone()[0]
+        # The executor raises to its worker while retaining a pollable failed row.
+        with self.assertRaises(PipelineRunExecutionError):
+            self.executor.execute(claimed_run["id"])
 
-        self.assertEqual(
-            json.loads(stored_configuration)["evaluation"]["answer_metrics"],
-            ["groundedness", "answer_relevance"],
-        )
+        poll_response = await self._request("GET", f"/runs/{run_id}")
+        failed_run = poll_response.json()
+        self.assertEqual(failed_run["status"], "failed")
+        self.assertEqual(failed_run["chunking"]["status"], "failed")
+        self.assertEqual(failed_run["embedding"]["status"], "pending")
+        self.assertEqual(failed_run["error"]["code"], "missing_parse_artifact")
+        self.assertEqual(failed_run["error"]["stage"], "chunking")
 
-    async def test_create_run_rejects_unknown_evaluation_metric(self) -> None:
-        """Verify evaluation selections are controlled by the backend catalog.
+    async def test_tokenizer_failure_is_sanitized(self) -> None:
+        """Verify tokenizer details do not leak through the polling contract.
 
         Args:
             None.
 
         Returns:
-            None. Assertions verify a structured compatibility failure.
+            None. Assertions verify safe persisted failure text.
         """
-        payload = _run_payload()
-        configuration = payload["configuration"]
-        configuration["evaluation"] = {
-            "answer_metrics": ["unknown_metric"],
-        }
-        response = await self._post_run(payload)
-
-        # Identify the incompatible metric list without exposing internal details.
-        self.assertEqual(response.status_code, 422)
-        self.assertEqual(
-            response.json()["detail"],
-            {
-                "code": "invalid_pipeline_configuration",
-                "message": "Evaluation metric 'unknown_metric' is not supported.",
-                "field": "configuration.evaluation.answer_metrics",
-            },
+        self.executor = PipelineExecutor(
+            tokenizer=UnavailableRunTestTokenizer(),
+            embedding_provider=RunTestEmbeddingProvider(),
+            vector_store=self.vector_store,
         )
+        enqueue_response = await self._request("POST", "/runs", _run_payload())
+        claimed_run = claim_next_pending_run()
 
-    async def test_create_run_rejects_metrics_without_required_labels(self) -> None:
-        """Verify single-question runs reject metrics requiring dataset labels.
+        # A missing backend asset is terminal for this run but not for the worker.
+        with self.assertRaises(PipelineRunExecutionError):
+            self.executor.execute(claimed_run["id"])
+
+        poll_response = await self._request(
+            "GET",
+            f"/runs/{enqueue_response.json()['id']}",
+        )
+        failure = poll_response.json()["error"]
+        self.assertEqual(failure["code"], "chunking_tokenizer_unavailable")
+        self.assertNotIn("simulated", failure["message"])
+
+    async def test_embedding_provider_failure_preserves_ready_chunks(self) -> None:
+        """Verify an unreachable model API fails embedding without losing chunks.
 
         Args:
             None.
 
         Returns:
-            None. Assertions verify retrieval and reference-answer restrictions.
+            None. Assertions verify graceful failure and upstream provenance.
         """
-        retrieval_payload = _run_payload()
-        retrieval_configuration = retrieval_payload["configuration"]
-        retrieval_configuration["evaluation"] = {
-            "retrieval_metrics": ["hit_rate_at_k"],
-        }
-        retrieval_response = await self._post_run(retrieval_payload)
-
-        # Retrieval evaluation needs manually labelled relevant documents.
-        self.assertEqual(retrieval_response.status_code, 422)
-        self.assertEqual(
-            retrieval_response.json()["detail"]["field"],
-            "configuration.evaluation.retrieval_metrics",
+        self.executor = PipelineExecutor(
+            tokenizer=RunTestTokenizer(),
+            embedding_provider=UnavailableRunTestEmbeddingProvider(),
+            vector_store=self.vector_store,
         )
+        enqueue_response = await self._request("POST", "/runs", _run_payload())
+        claimed_run = claim_next_pending_run()
 
-        correctness_payload = _run_payload()
-        correctness_configuration = correctness_payload["configuration"]
-        correctness_configuration["evaluation"] = {
-            "answer_metrics": ["answer_correctness"],
-        }
-        correctness_response = await self._post_run(correctness_payload)
+        # Provider availability is checked only by the real embedding request.
+        with self.assertRaises(PipelineRunExecutionError):
+            self.executor.execute(claimed_run["id"])
 
-        # Answer correctness cannot run without a labelled reference answer.
-        self.assertEqual(correctness_response.status_code, 422)
-        self.assertEqual(
-            correctness_response.json()["detail"]["field"],
-            "configuration.evaluation.answer_metrics",
+        poll_response = await self._request(
+            "GET",
+            f"/runs/{enqueue_response.json()['id']}",
         )
+        failed_run = poll_response.json()
+        self.assertEqual(failed_run["status"], "failed")
+        self.assertEqual(failed_run["chunking"]["status"], "completed")
+        self.assertEqual(failed_run["embedding"]["status"], "failed")
+        self.assertEqual(failed_run["error"]["stage"], "embedding")
+        self.assertEqual(failed_run["error"]["code"], "embedding_provider_unavailable")
+        self.assertIsNone(failed_run["embedding"]["vector_index_id"])
 
-    async def test_create_run_does_not_deduplicate_identical_submissions(self) -> None:
-        """Verify every user submission creates a distinct immutable run.
+    async def test_identical_runs_reuse_compatible_artifacts(self) -> None:
+        """Verify click history stays distinct while artifacts remain reusable.
 
         Args:
             None.
 
         Returns:
-            None. Assertions verify separate run identities and rows.
+            None. Assertions verify chunk and vector compatibility reuse.
         """
-        first_response = await self._post_run(_run_payload())
-        second_response = await self._post_run(_run_payload())
+        first_response = await self._request("POST", "/runs", _run_payload())
+        first_run = self._execute_next_run()
+        second_response = await self._request("POST", "/runs", _run_payload())
+        second_run = self._execute_next_run()
 
-        # Preserve click-level history even when the input and configuration match.
-        self.assertEqual(first_response.status_code, 201)
-        self.assertEqual(second_response.status_code, 201)
+        # Every click has a run ID while identical compatibility inputs share artifacts.
         self.assertNotEqual(first_response.json()["id"], second_response.json()["id"])
         self.assertEqual(
-            first_response.json()["chunking"]["chunk_set_id"],
-            second_response.json()["chunking"]["chunk_set_id"],
+            first_run["chunking"]["chunk_set_id"],
+            second_run["chunking"]["chunk_set_id"],
         )
-        self.assertFalse(first_response.json()["chunking"]["reused"])
-        self.assertTrue(second_response.json()["chunking"]["reused"])
+        self.assertEqual(
+            first_run["embedding"]["vector_index_id"],
+            second_run["embedding"]["vector_index_id"],
+        )
+        self.assertFalse(first_run["chunking"]["reused"])
+        self.assertTrue(second_run["chunking"]["reused"])
+        self.assertFalse(first_run["embedding"]["reused"])
+        self.assertTrue(second_run["embedding"]["reused"])
 
-        with sqlite3.connect(self.database_path) as connection:
-            run_count = connection.execute(
-                "SELECT COUNT(*) FROM pipeline_run"
-            ).fetchone()[0]
-            chunk_set_count = connection.execute(
-                "SELECT COUNT(*) FROM chunk_set"
-            ).fetchone()[0]
+    async def test_completed_run_rejects_second_completion(self) -> None:
+        """Verify terminal run history cannot be overwritten by a retry.
 
-        self.assertEqual(run_count, 2)
-        self.assertEqual(chunk_set_count, 1)
+        Args:
+            None.
+
+        Returns:
+            None. Assertions verify the repository lifecycle guard.
+        """
+        await self._request("POST", "/runs", _run_payload())
+        completed_run = self._execute_next_run()
+
+        # Repeating a terminal transition must fail instead of mutating history.
+        with self.assertRaises(InvalidRunStateError):
+            complete_run(
+                completed_run["id"],
+                completed_run["embedding"]["vector_index_id"],
+                True,
+                1,
+                2,
+            )

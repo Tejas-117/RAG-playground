@@ -1,4 +1,4 @@
-"""Coordinate pipeline stages while keeping stage implementations independent."""
+"""Coordinate persisted pipeline stages while keeping implementations independent."""
 
 import logging
 import sqlite3
@@ -9,10 +9,30 @@ from typing import Any
 from backend.db.repositories.runs import (
     ChunkSetNotReadyError,
     InvalidRunStateError,
+    RunNotFoundError,
+    VectorIndexNotReadyError,
     complete_run,
-    create_pending_run,
     fail_run,
-    mark_run_running,
+    get_run_execution_input,
+    record_chunking_result,
+)
+from backend.embedding.models import (
+    EmbeddingAuthenticationError,
+    EmbeddingInputTooLargeError,
+    EmbeddingProvider,
+    EmbeddingProviderError,
+    EmbeddingProviderUnavailableError,
+    EmbeddingRateLimitError,
+    EmbeddingRequestRejectedError,
+    EmbeddingRequestTimeoutError,
+    InvalidEmbeddingResponseError,
+    VectorStore,
+    VectorStoreError,
+)
+from backend.embedding.service import (
+    EmptyChunkSetError,
+    VectorIndexBuildResult,
+    build_or_reuse_vector_index,
 )
 from backend.ingestion.chunk_sets import (
     ChunkingCorpusNotFoundError,
@@ -23,148 +43,185 @@ from backend.ingestion.chunk_sets import (
 )
 from backend.ingestion.chunkers.models import ChunkingTokenizer
 from backend.ingestion.chunkers.tokenizer import TokenizerAssetError
-from backend.pipeline.configs import ChunkingConfig, PipelineConfig
+from backend.pipeline.configs import ChunkingConfig, EmbeddingConfig
 
 # Use the module name to identify overall pipeline lifecycle records.
 logger = logging.getLogger(__name__)
 
-# A chunk-set builder receives immutable inputs and returns a ready reusable artifact.
+# A chunk builder receives immutable inputs and returns a reusable ready artifact.
 ChunkSetBuilder = Callable[
     [str, ChunkingConfig, ChunkingTokenizer | None],
     ChunkSetBuildResult,
 ]
 
+# A vector-index builder consumes a ready chunk artifact and provider/store adapters.
+VectorIndexBuilder = Callable[
+    [
+        dict[str, Any],
+        EmbeddingConfig,
+        EmbeddingProvider | None,
+        VectorStore | None,
+    ],
+    VectorIndexBuildResult,
+]
+
 
 class PipelineRunExecutionError(RuntimeError):
-    """Expose one safe failed-run result to the API transport layer."""
+    """Expose one safe failed-run result to worker and transport boundaries."""
 
     def __init__(
         self,
         run_id: str,
+        stage: str,
         code: str,
         message: str,
         details: dict[str, Any] | None = None,
     ) -> None:
-        """Store the persisted run identity and structured public failure.
+        """Store persisted run identity and structured public failure.
 
         Args:
             run_id: Stable identifier of the failed pipeline run.
+            stage: Pipeline stage that encountered the failure.
             code: Machine-readable failure category.
             message: Safe user-readable failure explanation.
             details: Optional additional safe structured fields.
 
         Returns:
-            None. The initialized exception carries the transport-safe failure.
+            None. The exception carries a transport-safe failure.
         """
         # Initialize RuntimeError for conventional logging and exception chaining.
         super().__init__(message)
         self.run_id = run_id
+        self.stage = stage
         self.code = code
         self.message = message
         self.details = details or {}
 
 
 class PipelineExecutor:
-    """Run pipeline stages in order and persist the overall run lifecycle.
-
-    The executor currently coordinates chunking only. Future embedding, retrieval,
-    generation, and evaluation services will be injected here as independent stages;
-    their provider logic must remain outside this coordinator.
-    """
+    """Execute claimed runs through chunking and embedding in pipeline order."""
 
     def __init__(
         self,
         chunk_set_builder: ChunkSetBuilder = build_or_reuse_chunk_set,
+        vector_index_builder: VectorIndexBuilder = build_or_reuse_vector_index,
         tokenizer: ChunkingTokenizer | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
+        vector_store: VectorStore | None = None,
     ) -> None:
-        """Configure the independently testable chunking-stage dependency.
+        """Configure independently testable stage dependencies.
 
         Args:
-            chunk_set_builder: Service that builds or reuses one ready chunk set.
-            tokenizer: Optional tokenizer override used by deterministic tests.
+            chunk_set_builder: Service that builds or reuses one chunk set.
+            vector_index_builder: Service that builds or reuses one vector index.
+            tokenizer: Optional chunking tokenizer override for deterministic tests.
+            embedding_provider: Optional embedding adapter override for tests.
+            vector_store: Optional vector-store adapter override for tests.
 
         Returns:
-            None. Dependencies are retained without mutable execution state.
+            None. Dependencies are retained without mutable run state.
         """
         self._chunk_set_builder = chunk_set_builder
+        self._vector_index_builder = vector_index_builder
         self._tokenizer = tokenizer
+        self._embedding_provider = embedding_provider
+        self._vector_store = vector_store
 
-    def execute(
-        self,
-        corpus_id: str,
-        question: str,
-        configuration: PipelineConfig,
-    ) -> dict[str, Any]:
-        """Execute every currently implemented stage for one immutable run.
+    def execute(self, run_id: str) -> dict[str, Any]:
+        """Execute one already-claimed persisted run through available stages.
 
         Args:
-            corpus_id: Stable identifier of the selected immutable corpus.
-            question: Normalized non-empty user question.
-            configuration: Fully resolved and compatibility-validated pipeline config.
+            run_id: Stable identifier of a running persisted pipeline job.
 
         Returns:
-            Completed persisted run with a compact chunking artifact summary.
+            Completed run linked to ready chunk and vector-index artifacts.
 
         Raises:
-            PipelineRunExecutionError: If chunking or lifecycle persistence fails.
-            CorpusNotFoundError: Indirectly if pending-run creation finds no corpus.
-            sqlite3.Error: If the pending run cannot be created or started.
+            PipelineRunExecutionError: If a stage or lifecycle operation fails.
         """
-        # Persist the immutable request first so execution failures remain auditable.
-        pending_run = create_pending_run(corpus_id, question, configuration)
-        run_id = pending_run["id"]
-        started_counter = perf_counter()
-        logger.info("pipeline_run_created run_id=%s corpus_id=%s", run_id, corpus_id)
-
-        mark_run_running(run_id)
+        execution_input = get_run_execution_input(run_id)
+        corpus_id = execution_input["corpus_id"]
+        configuration = execution_input["configuration"]
+        run_started_counter = perf_counter()
+        current_stage = "chunking"
         logger.info("pipeline_run_started run_id=%s corpus_id=%s", run_id, corpus_id)
 
         try:
-            # Chunking is the first and currently only executable pipeline stage.
+            # Resolve chunking independently and record its run-specific latency.
+            chunking_started_counter = perf_counter()
             chunking_result = self._chunk_set_builder(
                 corpus_id,
                 configuration.chunking,
                 self._tokenizer,
             )
-            duration_ms = _elapsed_milliseconds(started_counter)
-
-            # A run completes only after it references a fully persisted ready artifact.
-            completed_run = complete_run(
+            chunking_duration_ms = _elapsed_milliseconds(chunking_started_counter)
+            record_chunking_result(
                 run_id,
                 chunking_result.artifact["id"],
                 chunking_result.reused,
-                duration_ms,
+                chunking_duration_ms,
             )
             logger.info(
-                "pipeline_run_completed run_id=%s corpus_id=%s chunk_set_id=%s "
-                "chunk_set_reused=%s duration_ms=%d",
+                "pipeline_run_stage_completed run_id=%s corpus_id=%s "
+                "stage=chunking artifact_id=%s reused=%s duration_ms=%d",
                 run_id,
                 corpus_id,
                 chunking_result.artifact["id"],
                 chunking_result.reused,
-                duration_ms,
+                chunking_duration_ms,
+            )
+
+            # Embed only the exact ready chunk artifact attached to this run.
+            current_stage = "embedding"
+            embedding_started_counter = perf_counter()
+            embedding_result = self._vector_index_builder(
+                chunking_result.artifact,
+                configuration.embedding,
+                self._embedding_provider,
+                self._vector_store,
+            )
+            embedding_duration_ms = _elapsed_milliseconds(embedding_started_counter)
+            total_duration_ms = _elapsed_milliseconds(run_started_counter)
+            completed_run = complete_run(
+                run_id,
+                embedding_result.artifact["id"],
+                embedding_result.reused,
+                embedding_duration_ms,
+                total_duration_ms,
+            )
+            logger.info(
+                "pipeline_run_completed run_id=%s corpus_id=%s "
+                "chunk_set_id=%s vector_index_id=%s "
+                "vector_index_reused=%s duration_ms=%d",
+                run_id,
+                corpus_id,
+                chunking_result.artifact["id"],
+                embedding_result.artifact["id"],
+                embedding_result.reused,
+                total_duration_ms,
             )
             return completed_run
         except Exception as error:
-            # Convert stage-specific errors into one safe, persisted run failure shape.
-            execution_error = _map_execution_error(run_id, error)
-            duration_ms = _elapsed_milliseconds(started_counter)
+            # Convert stage-specific errors into one safe persisted failure shape.
+            execution_error = _map_execution_error(run_id, current_stage, error)
+            duration_ms = _elapsed_milliseconds(run_started_counter)
             logger.exception(
-                "pipeline_run_stage_failed run_id=%s corpus_id=%s stage=chunking "
+                "pipeline_run_stage_failed run_id=%s corpus_id=%s stage=%s "
                 "error_code=%s duration_ms=%d",
                 run_id,
                 corpus_id,
+                current_stage,
                 execution_error.code,
                 duration_ms,
             )
             error_details = {
-                "stage": "chunking",
+                "stage": current_stage,
                 "message": execution_error.message,
                 **execution_error.details,
             }
 
             try:
-                # Preserve the failure against the already-created running run.
+                # Preserve the failure and any already-attached upstream artifact.
                 fail_run(
                     run_id,
                     execution_error.code,
@@ -177,11 +234,9 @@ class PipelineExecutor:
                     run_id,
                     corpus_id,
                 )
-
-                # If failure recording itself fails, expose a persistence error without
-                # leaking either database details or the original stage exception.
                 raise PipelineRunExecutionError(
                     run_id,
+                    current_stage,
                     "persistence_error",
                     "The failed pipeline run could not be recorded.",
                 ) from persistence_error
@@ -204,77 +259,224 @@ def _elapsed_milliseconds(started_counter: float) -> int:
 
 def _map_execution_error(
     run_id: str,
+    stage: str,
     error: Exception,
 ) -> PipelineRunExecutionError:
-    """Translate an internal chunking failure into a stable public category.
+    """Translate an internal stage failure into a stable public category.
 
     Args:
         run_id: Stable identifier of the run that encountered the failure.
-        error: Internal exception raised by chunking or lifecycle persistence.
+        stage: Pipeline stage active when the exception was raised.
+        error: Internal exception raised by stage or lifecycle code.
 
     Returns:
-        Safe structured pipeline execution error suitable for persistence and HTTP.
+        Safe structured pipeline execution error suitable for persistence.
     """
-    # A known corpus with no documents cannot produce a meaningful chunk artifact.
+    # Map chunking-domain failures only while the chunking stage is active.
+    if stage == "chunking":
+        return _map_chunking_error(run_id, error)
+
+    return _map_embedding_error(run_id, error)
+
+
+def _map_chunking_error(
+    run_id: str,
+    error: Exception,
+) -> PipelineRunExecutionError:
+    """Translate a chunking failure into a safe pipeline error.
+
+    Args:
+        run_id: Stable identifier of the failed run.
+        error: Exception raised during chunk-set resolution.
+
+    Returns:
+        Safe chunking-stage execution error.
+    """
+    # A known corpus with no documents cannot produce a chunk artifact.
     if isinstance(error, EmptyChunkingCorpusError):
         return PipelineRunExecutionError(
             run_id,
+            "chunking",
             "empty_corpus",
             "The selected corpus does not contain any documents to chunk.",
         )
 
-    # Report all documents missing their canonical parse in one repairable response.
+    # Report every source document missing its canonical parse together.
     if isinstance(error, MissingParseArtifactError):
         return PipelineRunExecutionError(
             run_id,
+            "chunking",
             "missing_parse_artifact",
             "Canonical parsing is incomplete for the selected corpus.",
             {"document_ids": error.document_ids},
         )
 
-    # A corpus removed or otherwise unavailable between lifecycle steps is not usable.
+    # A corpus removed between enqueue and execution is no longer usable.
     if isinstance(error, ChunkingCorpusNotFoundError):
         return PipelineRunExecutionError(
             run_id,
+            "chunking",
             "corpus_not_found",
             "The selected corpus does not exist.",
         )
 
-    # Missing or modified pinned assets are operational backend failures.
+    # Missing or modified pinned tokenizer assets are operational failures.
     if isinstance(error, TokenizerAssetError):
         return PipelineRunExecutionError(
             run_id,
+            "chunking",
             "chunking_tokenizer_unavailable",
             "The configured chunking tokenizer is unavailable.",
         )
 
-    # Database and invalid lifecycle/artifact states share the persistence boundary.
+    # Database and invalid artifact states share the persistence boundary.
     if isinstance(
         error,
-        (sqlite3.Error, InvalidRunStateError, ChunkSetNotReadyError),
+        (
+            sqlite3.Error,
+            InvalidRunStateError,
+            ChunkSetNotReadyError,
+            RunNotFoundError,
+        ),
     ):
         return PipelineRunExecutionError(
             run_id,
+            "chunking",
             "persistence_error",
             "The pipeline execution state could not be saved.",
         )
 
-    # Hide unexpected implementation details behind one stable chunking error.
+    # Hide unexpected chunker implementation details.
     return PipelineRunExecutionError(
         run_id,
+        "chunking",
         "chunking_failed",
         "The selected corpus could not be chunked.",
     )
 
 
+def _map_embedding_error(
+    run_id: str,
+    error: Exception,
+) -> PipelineRunExecutionError:
+    """Translate an embedding or indexing failure into a safe pipeline error.
+
+    Args:
+        run_id: Stable identifier of the failed run.
+        error: Exception raised while building the vector index.
+
+    Returns:
+        Safe embedding-stage execution error.
+    """
+    # Keep common remote-provider failure modes distinguishable for retry UX.
+    provider_errors: tuple[tuple[type[Exception], str, str], ...] = (
+        (
+            EmbeddingProviderUnavailableError,
+            "embedding_provider_unavailable",
+            "The embedding provider could not complete the request.",
+        ),
+        (
+            EmbeddingRequestTimeoutError,
+            "embedding_request_timeout",
+            "The embedding provider request timed out.",
+        ),
+        (
+            EmbeddingAuthenticationError,
+            "embedding_authentication_failed",
+            "The embedding provider rejected backend authentication.",
+        ),
+        (
+            EmbeddingRateLimitError,
+            "embedding_rate_limited",
+            "The embedding provider rate limit was reached.",
+        ),
+        (
+            EmbeddingInputTooLargeError,
+            "embedding_input_too_large",
+            "A chunk exceeds the selected embedding model's input limit.",
+        ),
+        (
+            EmbeddingRequestRejectedError,
+            "embedding_request_rejected",
+            "The embedding provider rejected the model or request.",
+        ),
+        (
+            InvalidEmbeddingResponseError,
+            "invalid_embedding_response",
+            "The embedding provider returned an invalid vector response.",
+        ),
+    )
+
+    # Return the first matching specific provider category.
+    for error_type, code, message in provider_errors:
+        if isinstance(error, error_type):
+            return PipelineRunExecutionError(
+                run_id,
+                "embedding",
+                code,
+                message,
+            )
+
+    # A ready but empty upstream artifact cannot produce a searchable index.
+    if isinstance(error, EmptyChunkSetError):
+        return PipelineRunExecutionError(
+            run_id,
+            "embedding",
+            "empty_chunk_set",
+            "The chunk artifact does not contain any text to embed.",
+        )
+
+    # Chroma failures remain separate from remote embedding-provider failures.
+    if isinstance(error, VectorStoreError):
+        return PipelineRunExecutionError(
+            run_id,
+            "embedding",
+            "vector_store_unavailable",
+            "The vector index could not be stored.",
+        )
+
+    # Relational state failures must not leak SQLite or constraint details.
+    if isinstance(
+        error,
+        (
+            sqlite3.Error,
+            InvalidRunStateError,
+            VectorIndexNotReadyError,
+            RunNotFoundError,
+        ),
+    ):
+        return PipelineRunExecutionError(
+            run_id,
+            "embedding",
+            "vector_index_persistence_failed",
+            "The vector-index execution state could not be saved.",
+        )
+
+    # Hide every other provider or index implementation detail.
+    if isinstance(error, EmbeddingProviderError):
+        return PipelineRunExecutionError(
+            run_id,
+            "embedding",
+            "embedding_failed",
+            "The selected chunks could not be embedded.",
+        )
+
+    return PipelineRunExecutionError(
+        run_id,
+        "embedding",
+        "embedding_failed",
+        "The selected chunks could not be embedded.",
+    )
+
+
 def get_pipeline_executor() -> PipelineExecutor:
-    """Provide the stateless production pipeline executor to FastAPI.
+    """Provide the stateless production pipeline executor.
 
     Args:
         None.
 
     Returns:
-        Executor configured with the pinned production chunking tokenizer.
+        Executor configured with production stage services and lazy adapters.
     """
-    # A fresh coordinator carries no run state and remains safe for concurrent requests.
+    # A fresh coordinator carries no run state and remains safe across worker jobs.
     return PipelineExecutor()

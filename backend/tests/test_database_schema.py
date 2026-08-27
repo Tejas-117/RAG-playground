@@ -371,22 +371,65 @@ def test_schema_records_single_question_pipeline_runs() -> None:
         ),
     )
 
+    # Insert the ready vector artifact required by a completed embedding run.
+    connection.execute(
+        """
+        INSERT INTO vector_index (
+            id, chunk_set_id, fingerprint, embedding_config_json, provider,
+            model, provider_model, provider_revision, dimensions,
+            distance_metric, input_policy_version, indexer_name,
+            indexer_version, collection_name, status, vector_count,
+            created_at, started_at, completed_at, duration_ms
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            "vector-index-1",
+            "chunk-set-1",
+            "vector-fingerprint-1",
+            '{"provider":"ollama","model":"nomic-embed-text"}',
+            "ollama",
+            "nomic-embed-text",
+            "nomic-embed-text",
+            3,
+            "cosine",
+            "nomic-retrieval-prefix-v1",
+            "chroma-persistent",
+            "1",
+            "rag_idx_test",
+            1,
+            "2026-08-02T00:00:01Z",
+            "2026-08-02T00:00:01Z",
+            "2026-08-02T00:00:02Z",
+            1,
+        ),
+    )
+
     # Persist a completed run linked directly to the exact ready chunk artifact.
     connection.execute(
         """
         INSERT INTO pipeline_run (
-            id, corpus_id, chunk_set_id, question, effective_config_json,
-            status, chunk_set_reused, created_at, started_at, completed_at,
-            duration_ms, error_code, error_details_json
-        ) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, NULL, NULL)
+            id, corpus_id, chunk_set_id, vector_index_id, question,
+            effective_config_json, status, current_stage, chunk_set_reused,
+            vector_index_reused, chunking_duration_ms, embedding_duration_ms,
+            created_at, started_at, completed_at, duration_ms, error_code,
+            error_details_json
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, 'completed', NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL
+        )
         """,
         (
             "run-1",
             "corpus-1",
             "chunk-set-1",
+            "vector-index-1",
             "What is the refund policy?",
             '{"retrieval":{"top_k":10}}',
             0,
+            0,
+            1,
+            1,
             "2026-08-02T00:00:01Z",
             "2026-08-02T00:00:01Z",
             "2026-08-02T00:00:02Z",

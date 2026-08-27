@@ -150,18 +150,58 @@ CREATE INDEX IF NOT EXISTS idx_chunk_chunk_set_id
 CREATE INDEX IF NOT EXISTS idx_chunk_source_document_id
     ON chunk (source_document_id);
 
+-- A reusable vector-search artifact built from one exact chunk set, embedding
+-- configuration, provider adapter policy, and Chroma distance space.
+CREATE TABLE IF NOT EXISTS vector_index (
+    id TEXT PRIMARY KEY,
+    chunk_set_id TEXT NOT NULL REFERENCES chunk_set(id) ON DELETE RESTRICT,
+    fingerprint TEXT NOT NULL UNIQUE,
+    embedding_config_json TEXT NOT NULL CHECK (
+        json_valid(embedding_config_json)
+        AND json_type(embedding_config_json) = 'object'
+    ),
+    provider TEXT NOT NULL CHECK (length(trim(provider)) > 0),
+    model TEXT NOT NULL CHECK (length(trim(model)) > 0),
+    provider_model TEXT,
+    provider_revision TEXT,
+    dimensions INTEGER NOT NULL CHECK (dimensions > 0),
+    distance_metric TEXT NOT NULL CHECK (
+        distance_metric IN ('cosine', 'dot_product', 'euclidean')
+    ),
+    input_policy_version TEXT NOT NULL,
+    indexer_name TEXT NOT NULL,
+    indexer_version TEXT NOT NULL,
+    collection_name TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status = 'ready'),
+    vector_count INTEGER NOT NULL CHECK (vector_count > 0),
+    created_at TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vector_index_chunk_set_id
+    ON vector_index (chunk_set_id);
+
 -- One immutable pipeline execution, including its resolved configuration,
 -- lifecycle, reusable chunk artifact, timing, and structured failure state.
 CREATE TABLE IF NOT EXISTS pipeline_run (
     id TEXT PRIMARY KEY,
     corpus_id TEXT NOT NULL REFERENCES corpus(id) ON DELETE RESTRICT,
     chunk_set_id TEXT REFERENCES chunk_set(id) ON DELETE RESTRICT,
+    vector_index_id TEXT REFERENCES vector_index(id) ON DELETE RESTRICT,
     question TEXT NOT NULL CHECK (length(trim(question)) > 0),
     effective_config_json TEXT NOT NULL CHECK (json_valid(effective_config_json)),
     status TEXT NOT NULL CHECK (
         status IN ('pending', 'running', 'completed', 'failed')
     ),
+    current_stage TEXT CHECK (
+        current_stage IS NULL OR current_stage IN ('chunking', 'embedding')
+    ),
     chunk_set_reused INTEGER CHECK (chunk_set_reused IN (0, 1)),
+    vector_index_reused INTEGER CHECK (vector_index_reused IN (0, 1)),
+    chunking_duration_ms INTEGER CHECK (chunking_duration_ms >= 0),
+    embedding_duration_ms INTEGER CHECK (embedding_duration_ms >= 0),
     created_at TEXT NOT NULL,
     started_at TEXT,
     completed_at TEXT,
@@ -174,12 +214,20 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
         )
     ),
     CHECK (
-        status != 'running' OR started_at IS NOT NULL
+        status != 'running' OR (
+            started_at IS NOT NULL
+            AND current_stage IS NOT NULL
+        )
     ),
     CHECK (
         status != 'completed' OR (
             chunk_set_id IS NOT NULL
             AND chunk_set_reused IS NOT NULL
+            AND vector_index_id IS NOT NULL
+            AND vector_index_reused IS NOT NULL
+            AND chunking_duration_ms IS NOT NULL
+            AND embedding_duration_ms IS NOT NULL
+            AND current_stage IS NULL
             AND started_at IS NOT NULL
             AND completed_at IS NOT NULL
             AND duration_ms IS NOT NULL
@@ -200,3 +248,9 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_run_corpus_id
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_run_chunk_set_id
     ON pipeline_run (chunk_set_id);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_run_vector_index_id
+    ON pipeline_run (vector_index_id);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_run_queue
+    ON pipeline_run (status, created_at);

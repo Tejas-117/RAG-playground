@@ -135,8 +135,9 @@ A `vector_index` represents one compatible indexed embedding space. Store in SQL
 - embedding dimensions
 - distance metric
 - embedding configuration
+- provider-reported model/revision and versioned input policy
 - Chroma collection name/reference
-- build status, timings, and errors
+- ready status, timings, and vector count
 - index fingerprint
 
 Store in Chroma:
@@ -151,6 +152,7 @@ An index must never be silently reused if any compatibility-defining input chang
 - embedding model
 - embedding dimensions
 - distance metric
+- provider adapter and input policy
 - vector-store/index configuration
 
 Cosine, dot-product, and Euclidean values have different meanings. Scores must be labelled accurately or normalized before comparison/display.
@@ -271,15 +273,18 @@ A run records the exact effective configuration used for an execution. Named edi
 
 The first backend run slice supports a single ad hoc question. `POST /runs`
 validates the selected immutable corpus and backend-supported configuration,
-then uses `PipelineExecutor` to persist the run and execute through chunking.
-The executor builds or reuses a ready chunk set, stores its ID directly on
-`pipeline_run`, and records whether reuse occurred. The question remains on the
-run because it is query-specific.
+persists a pending immutable run, and returns `202`. The application-owned local
+worker claims queued runs and uses `PipelineExecutor` to execute chunking and
+embedding. The executor links the ready chunk set and vector index directly
+from `pipeline_run` and records whether each artifact was reused. The question
+remains on the run because it is query-specific.
 
 Runs progress through `pending`, `running`, and either `completed` or `failed`.
 At this implementation stage, `completed` means every currently executable
-stage—chunking—finished successfully. Failed runs retain safe structured errors
-and timing, while invalid requests rejected before execution create no run.
+stage—chunking and embedding—finished successfully. `current_stage` identifies
+active work, and `GET /runs/{run_id}` provides the stable polling resource.
+Failed runs retain safe structured errors and timing, while invalid requests
+rejected before enqueueing create no run.
 
 The effective configuration includes ordered `retrieval_metrics` and
 `answer_metrics` lists. Both lists may be empty to skip evaluation. A
@@ -337,7 +342,7 @@ The executor is the sequencing boundary for later services:
 ```text
 PipelineExecutor
   -> ChunkingService
-  -> EmbeddingIndexService  # future
+  -> EmbeddingIndexService
   -> RetrievalService       # future
   -> GenerationService      # future
   -> EvaluationService      # future

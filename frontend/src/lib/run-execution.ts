@@ -1,10 +1,20 @@
 import { type RunApiFailure, type RunResponse } from "@/validation/runs";
 
 /** Stable execution stages presented in pipeline order after source selection. */
-export type RunStageId = "chunking" | "embedding" | "retrieval" | "generation" | "evaluation";
+export type RunStageId =
+  | "chunking"
+  | "embedding"
+  | "retrieval"
+  | "generation"
+  | "evaluation";
 
 /** Visual states supported by every execution stage. */
-export type RunStageStatus = "running" | "completed" | "failed" | "unavailable";
+export type RunStageStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "unavailable";
 
 /** One backend-neutral stage shown by the execution timeline. */
 export type RunStageView = {
@@ -14,9 +24,9 @@ export type RunStageView = {
   status: RunStageStatus;
 };
 
-/** Backend-neutral state consumed by the inline experiment execution panel. */
+/** Backend-neutral state consumed by the experiment execution modal. */
 export type RunExecutionView = {
-  status: "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed";
   corpusName: string;
   runId?: string;
   durationMs?: number;
@@ -25,18 +35,23 @@ export type RunExecutionView = {
     chunkSetId: string;
     chunkCount: number;
     reused: boolean;
+    durationMs: number;
+  };
+  embedding?: {
+    vectorIndexId: string;
+    vectorCount: number;
+    dimensions: number;
+    provider: string;
+    model: string;
+    distanceMetric: string;
+    reused: boolean;
+    durationMs: number;
   };
   stages: RunStageView[];
 };
 
 /** Future stages stay visible without implying that the backend executed them. */
 const unavailableStages: RunStageView[] = [
-  {
-    id: "embedding",
-    label: "Embed",
-    description: "Not available yet",
-    status: "unavailable",
-  },
   {
     id: "retrieval",
     label: "Retrieve",
@@ -58,54 +73,106 @@ const unavailableStages: RunStageView[] = [
 ];
 
 /**
- * Creates the honest client state displayed while the synchronous run request executes.
+ * Describes one persisted stage without inventing fractional progress.
  *
- * @param corpusName - Human-readable name of the corpus snapshot being processed.
- * @returns A running view with chunking active and later stages unavailable.
+ * @param run - Validated run containing the latest persisted stage state.
+ * @param stage - Chunking or embedding stage being presented.
+ * @returns A concise description derived only from persisted facts.
  */
-export function createRunningExecution(corpusName: string): RunExecutionView {
-  return {
-    status: "running",
-    corpusName,
-    stages: [
-      {
-        id: "chunking",
-        label: "Chunk",
-        description: "Preparing document chunks",
-        status: "running",
-      },
-      ...unavailableStages,
-    ],
-  };
+function describeStage(
+  run: RunResponse,
+  stage: "chunking" | "embedding",
+): string {
+  const stageResult = run[stage];
+
+  // Active stages name the real work currently performed by the backend.
+  if (stageResult.status === "running") {
+    return stage === "chunking"
+      ? "Creating reusable document chunks"
+      : `Requesting vectors from ${run.embedding.provider}`;
+  }
+
+  // Completed stages distinguish cache reuse from newly materialized artifacts.
+  if (stageResult.status === "completed") {
+    return stageResult.reused
+      ? `Reused compatible ${stage === "chunking" ? "chunks" : "vector index"}`
+      : `Created ${stage === "chunking" ? "document chunks" : "vector index"}`;
+  }
+
+  // Failed stages stay explicit while the detailed safe message appears in the ledger.
+  if (stageResult.status === "failed") {
+    return `${stage === "chunking" ? "Chunking" : "Embedding"} did not complete`;
+  }
+
+  // A wholly pending run has not yet been claimed by the local worker.
+  if (run.status === "pending" && stage === "chunking") {
+    return "Waiting for the pipeline worker";
+  }
+
+  return "Waiting for the previous stage";
 }
 
 /**
- * Maps the current completed backend contract into the stable UI presentation model.
+ * Maps any persisted backend run state into the stable UI presentation model.
  *
- * @param run - Validated completed run returned by POST /runs.
+ * @param run - Validated run returned by enqueueing or polling.
  * @param corpusName - Human-readable name captured when the run started.
- * @returns A completed view containing real chunking results.
+ * @returns A presentation view containing only real persisted stage facts.
  */
-export function createCompletedExecution(
+export function createExecutionView(
   run: RunResponse,
   corpusName: string,
 ): RunExecutionView {
+  const chunking =
+    run.chunking.chunk_set_id !== null &&
+    run.chunking.chunk_count !== null &&
+    run.chunking.reused !== null &&
+    run.chunking.duration_ms !== null
+      ? {
+          chunkSetId: run.chunking.chunk_set_id,
+          chunkCount: run.chunking.chunk_count,
+          reused: run.chunking.reused,
+          durationMs: run.chunking.duration_ms,
+        }
+      : undefined;
+  const embedding =
+    run.embedding.vector_index_id !== null &&
+    run.embedding.vector_count !== null &&
+    run.embedding.dimensions !== null &&
+    run.embedding.reused !== null &&
+    run.embedding.duration_ms !== null
+      ? {
+          vectorIndexId: run.embedding.vector_index_id,
+          vectorCount: run.embedding.vector_count,
+          dimensions: run.embedding.dimensions,
+          provider: run.embedding.provider,
+          model: run.embedding.model,
+          distanceMetric: run.embedding.distance_metric,
+          reused: run.embedding.reused,
+          durationMs: run.embedding.duration_ms,
+        }
+      : undefined;
+
   return {
-    status: "completed",
+    status: run.status,
     corpusName,
     runId: run.id,
-    durationMs: run.duration_ms,
-    chunking: {
-      chunkSetId: run.chunking.chunk_set_id,
-      chunkCount: run.chunking.chunk_count,
-      reused: run.chunking.reused,
-    },
+    durationMs: run.duration_ms ?? undefined,
+    errorMessage: run.error?.message,
+    chunking,
+    embedding,
     stages: [
       {
         id: "chunking",
         label: "Chunk",
-        description: run.chunking.reused ? "Reused saved chunks" : "Created document chunks",
-        status: "completed",
+        description: describeStage(run, "chunking"),
+        status: run.chunking.status,
+      },
+      {
+        id: "embedding",
+        label: "Embed",
+        description: describeStage(run, "embedding"),
+        status: run.embedding.status,
       },
       ...unavailableStages,
     ],
@@ -113,30 +180,32 @@ export function createCompletedExecution(
 }
 
 /**
- * Creates a retryable failed view without exposing unvalidated transport details.
+ * Creates a retryable failure for requests rejected before a run was enqueued.
  *
  * @param failure - Safe backend failure details or a local fallback message.
- * @param corpusName - Human-readable name captured when the run started.
- * @returns A failed view that identifies chunking when it is the known failed stage.
+ * @param corpusName - Human-readable name captured when submission started.
+ * @returns A failed view that does not imply any pipeline stage began.
  */
 export function createFailedExecution(
   failure: RunApiFailure,
   corpusName: string,
 ): RunExecutionView {
-  // A persisted run ID identifies an execution failure even before stage is returned publicly.
-  const failedStage = failure.stage === "chunking" || failure.runId !== undefined;
-
   return {
     status: "failed",
     corpusName,
-    runId: failure.runId,
     errorMessage: failure.message,
     stages: [
       {
         id: "chunking",
         label: "Chunk",
-        description: failedStage ? "Chunking did not complete" : "Execution stopped",
-        status: failedStage ? "failed" : "unavailable",
+        description: "The run could not be enqueued",
+        status: "unavailable",
+      },
+      {
+        id: "embedding",
+        label: "Embed",
+        description: "Not started",
+        status: "unavailable",
       },
       ...unavailableStages,
     ],

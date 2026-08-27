@@ -10,7 +10,7 @@ const pipelineConfigurationSchema = z.object({
   embedding: z.object({
     provider: z.string().min(1),
     model: z.string().min(1),
-    distance_metric: z.string().min(1),
+    distance_metric: z.enum(["cosine", "dot_product", "euclidean"]),
   }),
   retrieval: z.object({
     top_k: z.number().int().positive(),
@@ -34,41 +34,70 @@ export const runCreateRequestSchema = z.object({
   configuration: pipelineConfigurationSchema,
 });
 
-/** Runtime contract for the ready chunk artifact returned by the current pipeline. */
+/** Lifecycle values returned for individual asynchronous stages. */
+const runStageStatusSchema = z.enum([
+  "pending",
+  "running",
+  "completed",
+  "failed",
+]);
+
+/** Runtime contract for chunking state and its optional ready artifact. */
 const runChunkingResponseSchema = z.object({
-  chunk_set_id: z.string().min(1),
-  status: z.literal("ready"),
-  chunk_count: z.number().int().nonnegative(),
-  reused: z.boolean(),
+  status: runStageStatusSchema,
+  chunk_set_id: z.string().min(1).nullable(),
+  chunk_count: z.number().int().nonnegative().nullable(),
+  reused: z.boolean().nullable(),
+  duration_ms: z.number().int().nonnegative().nullable(),
 });
 
-/** Runtime contract for a completed run returned by POST /runs. */
+/** Runtime contract for embedding state and its optional ready vector index. */
+const runEmbeddingResponseSchema = z.object({
+  status: runStageStatusSchema,
+  vector_index_id: z.string().min(1).nullable(),
+  vector_count: z.number().int().nonnegative().nullable(),
+  dimensions: z.number().int().positive().nullable(),
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  distance_metric: z.enum(["cosine", "dot_product", "euclidean"]),
+  reused: z.boolean().nullable(),
+  duration_ms: z.number().int().nonnegative().nullable(),
+});
+
+/** Runtime contract for a persisted execution failure returned while polling. */
+const runFailureSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  stage: z.enum(["chunking", "embedding"]).nullable(),
+  details: z.record(z.string(), z.unknown()),
+});
+
+/** Runtime contract shared by POST /runs and GET /runs/{id}. */
 const runResponseSchema = runCreateRequestSchema.extend({
   id: z.string().min(1),
-  status: z.literal("completed"),
+  status: z.enum(["pending", "running", "completed", "failed"]),
+  current_stage: z.enum(["chunking", "embedding"]).nullable(),
   created_at: z.string().min(1),
-  started_at: z.string().min(1),
-  completed_at: z.string().min(1),
-  duration_ms: z.number().int().nonnegative(),
+  started_at: z.string().min(1).nullable(),
+  completed_at: z.string().min(1).nullable(),
+  duration_ms: z.number().int().nonnegative().nullable(),
   chunking: runChunkingResponseSchema,
+  embedding: runEmbeddingResponseSchema,
+  error: runFailureSchema.nullable(),
 });
 
-/** Structured error detail returned by application-level FastAPI failures. */
+/** Structured error detail returned by request-level FastAPI failures. */
 const runApiErrorSchema = z.object({
   detail: z.object({
     code: z.string().min(1),
     message: z.string().min(1),
     field: z.string().min(1).optional(),
-    run_id: z.string().min(1).optional(),
-    stage: z.string().min(1).optional(),
   }),
 });
 
-/** Safe application-level failure details that the run UI may display. */
+/** Safe request-level failure details that the run UI may display. */
 export type RunApiFailure = {
   message: string;
-  runId?: string;
-  stage?: string;
 };
 
 /** A validated request payload inferred from the public runtime contract. */
@@ -78,7 +107,7 @@ export type RunCreateRequest = z.infer<typeof runCreateRequestSchema>;
 export type RunResponse = z.infer<typeof runResponseSchema>;
 
 /**
- * Validates an untrusted successful response returned by POST /runs.
+ * Validates an untrusted run returned by enqueueing or polling.
  *
  * @param value - Response body received from the backend.
  * @returns The validated persisted run and effective configuration snapshot.
@@ -113,22 +142,18 @@ export function parseRunApiError(value: unknown): string | null {
 }
 
 /**
- * Extracts safe execution details from an application-level run failure.
+ * Extracts safe request-level details before a run has been persisted.
  *
  * @param value - Untrusted error response body received from the backend.
  * @returns Display-safe failure details when valid, otherwise null.
  */
 export function parseRunApiFailure(value: unknown): RunApiFailure | null {
-  const result = runApiErrorSchema.safeParse(value);
+  const message = parseRunApiError(value);
 
-  // Reject malformed failures instead of exposing unvalidated response values.
-  if (!result.success) {
+  // Keep malformed server responses out of presentation state.
+  if (message === null) {
     return null;
   }
 
-  return {
-    message: result.data.detail.message,
-    runId: result.data.detail.run_id,
-    stage: result.data.detail.stage,
-  };
+  return { message };
 }

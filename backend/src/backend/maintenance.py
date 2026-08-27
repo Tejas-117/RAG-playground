@@ -3,10 +3,12 @@
 from pathlib import Path
 
 from backend.db.connection import connect
+from backend.embedding.vector_store import get_vector_store
 
 # Delete dependent records before the immutable corpus and document roots.
 DATABASE_DELETE_ORDER = (
     "pipeline_run",
+    "vector_index",
     "chunk",
     "chunk_set",
     "parsed_block",
@@ -15,6 +17,22 @@ DATABASE_DELETE_ORDER = (
     "document",
     "corpus",
 )
+
+
+def clear_vector_store_data() -> int:
+    """Delete every application-owned vector collection from local Chroma.
+
+    Args:
+        None.
+
+    Returns:
+        Number of managed vector collections deleted.
+
+    Raises:
+        VectorStoreError: If Chroma cannot complete the reset.
+    """
+    # Delegate ownership filtering to the adapter that defines collection naming.
+    return get_vector_store().delete_managed_collections()
 
 
 def clear_database_data() -> int:

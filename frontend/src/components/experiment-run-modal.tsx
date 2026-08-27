@@ -44,6 +44,11 @@ function getStageStatusLabel(status: RunStageStatus): string {
     return "Complete";
   }
 
+  // Pending means persisted work is queued behind its worker or upstream stage.
+  if (status === "pending") {
+    return "Queued";
+  }
+
   // Identify the pipeline stage that stopped the run.
   if (status === "failed") {
     return "Failed";
@@ -79,24 +84,25 @@ export default function ExperimentRunModal({
     }
 
     return () => {
-      // Close any remaining native dialog state before restoring the triggering control.
-      if (dialog?.open) {
-        dialog.close();
-      }
-
+      // Removing the native dialog closes it; restore focus without emitting onClose.
       previouslyFocusedElement?.focus();
     };
   }, []);
 
   // Derive modal language and controls from the overall execution outcome.
-  const isRunning = execution.status === "running";
+  const isActive = execution.status === "pending" || execution.status === "running";
   const isCompleted = execution.status === "completed";
   const isFailed = execution.status === "failed";
-  const statusLabel = isRunning
-    ? "Experiment running"
+  const statusLabel = execution.status === "pending"
+    ? "Experiment queued"
+    : execution.status === "running"
+      ? "Experiment running"
     : isCompleted
-      ? "Chunking complete"
+      ? "Index ready"
       : "Experiment stopped";
+
+  // Select the persisted active stage for the concise result-ledger message.
+  const activeStage = execution.stages.find((stage) => stage.status === "running");
 
   /**
    * Requests a native dialog close after the run is no longer active.
@@ -105,7 +111,7 @@ export default function ExperimentRunModal({
    */
   function closeModal(): void {
     // Keep active execution visible because closing does not cancel the backend request.
-    if (!isRunning) {
+    if (!isActive) {
       dialogRef.current?.close();
     }
   }
@@ -118,7 +124,7 @@ export default function ExperimentRunModal({
    */
   function handleCancel(event: SyntheticEvent<HTMLDialogElement>): void {
     // Prevent Escape from hiding a request that is still executing.
-    if (isRunning) {
+    if (isActive) {
       event.preventDefault();
     }
   }
@@ -139,7 +145,7 @@ export default function ExperimentRunModal({
   return (
     /* The native dialog supplies a focus trap while CSS creates the blurred workbench backdrop. */
     <dialog
-      aria-busy={isRunning}
+      aria-busy={isActive}
       aria-labelledby="run-execution-heading"
       className="run-modal"
       onCancel={handleCancel}
@@ -165,7 +171,7 @@ export default function ExperimentRunModal({
           <div className="relative flex items-start justify-between gap-5">
             <div className="flex min-w-0 items-start gap-3">
               {/* The status icon communicates outcome without relying on color alone. */}
-              {isRunning ? (
+              {isActive ? (
                 <span
                   aria-hidden="true"
                   className={`
@@ -207,7 +213,7 @@ export default function ExperimentRunModal({
             </div>
 
             {/* Finished runs provide an explicit close action in addition to Escape. */}
-            {!isRunning ? (
+            {!isActive ? (
               <button
                 aria-label="Close run details"
                 className={`
@@ -334,31 +340,56 @@ export default function ExperimentRunModal({
             </p>
 
             {/* Running state explains why measurements are not available yet. */}
-            {isRunning ? (
+            {isActive ? (
               <div className="mt-5 border-l-2 border-[var(--charcoal)] pl-4">
-                <p className="text-sm font-bold">Building chunk artifact</p>
+                <p className="text-sm font-bold">
+                  {activeStage ? activeStage.description : "Waiting for the pipeline worker"}
+                </p>
                 <p className="mt-1 text-xs leading-5 text-[var(--muted-text)]">
-                  Measurements will appear when the backend finishes this stage.
+                  Persisted measurements appear after each stage completes.
                 </p>
               </div>
             ) : null}
 
-            {/* Completed runs expose chunking provenance and elapsed execution time. */}
-            {isCompleted && execution.chunking ? (
+            {/* Completed runs expose chunk and vector provenance with measured timings. */}
+            {isCompleted && execution.chunking && execution.embedding ? (
               <dl className="mt-5 divide-y divide-[var(--border-subtle)]">
-                <div className="pb-4">
-                  <dt className="font-mono text-[9px] uppercase text-[var(--muted-text)]">
-                    Chunks
-                  </dt>
-                  <dd className="mt-1 text-3xl font-bold tracking-[-0.05em]">
-                    {execution.chunking.chunkCount.toLocaleString()}
-                  </dd>
+                <div className="grid grid-cols-2 gap-4 pb-4">
+                  <div>
+                    <dt className="font-mono text-[9px] uppercase text-[var(--muted-text)]">
+                      Chunks
+                    </dt>
+                    <dd className="mt-1 text-3xl font-bold tracking-[-0.05em]">
+                      {execution.chunking.chunkCount.toLocaleString()}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="font-mono text-[9px] uppercase text-[var(--muted-text)]">
+                      Dimensions
+                    </dt>
+                    <dd className="mt-1 text-3xl font-bold tracking-[-0.05em]">
+                      {execution.embedding.dimensions.toLocaleString()}
+                    </dd>
+                  </div>
                 </div>
                 <div className="flex items-center justify-between gap-3 py-4">
-                  <dt className="text-xs text-[var(--muted-text)]">Artifact</dt>
+                  <dt className="text-xs text-[var(--muted-text)]">Chunk artifact</dt>
                   <dd className="flex items-center gap-2 text-xs font-bold">
                     <FiDatabase aria-hidden="true" className="size-3.5" />
                     {execution.chunking.reused ? "Reused" : "Created"}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-3 py-4">
+                  <dt className="text-xs text-[var(--muted-text)]">Vector index</dt>
+                  <dd className="flex items-center gap-2 text-xs font-bold">
+                    <FiDatabase aria-hidden="true" className="size-3.5" />
+                    {execution.embedding.reused ? "Reused" : "Created"}
+                  </dd>
+                </div>
+                <div className="py-4">
+                  <dt className="text-xs text-[var(--muted-text)]">Embedding model</dt>
+                  <dd className="mt-1 break-all text-xs font-bold">
+                    {execution.embedding.provider} · {execution.embedding.model}
                   </dd>
                 </div>
                 <div className="flex items-center justify-between gap-3 py-4">

@@ -1,34 +1,39 @@
-"""HTTP route for executing immutable single-question pipeline runs."""
+"""HTTP routes for enqueueing and polling immutable pipeline runs."""
 
 import logging
 import sqlite3
-from typing import Annotated, Literal
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, ValidationError
-from starlette.concurrency import run_in_threadpool
 
 from backend.api.routers.pipeline_options import _load_pipeline_options
-from backend.db.repositories.runs import CorpusNotFoundError
+from backend.db.repositories.runs import (
+    CorpusNotFoundError,
+    RunNotFoundError,
+    create_pending_run,
+    get_run,
+)
 from backend.pipeline.compatibility import (
     InvalidPipelineConfigurationError,
     validate_pipeline_config,
 )
 from backend.pipeline.configs import PipelineConfig
-from backend.pipeline.execution import (
-    PipelineExecutor,
-    PipelineRunExecutionError,
-    get_pipeline_executor,
-)
 
 router = APIRouter()
 
 # Use the module name so API-boundary run records remain distinguishable.
 logger = logging.getLogger(__name__)
 
+# Expose persisted lifecycle values as a closed API contract.
+RunStatus = Literal["pending", "running", "completed", "failed"]
+
+# Each stage has its own state so the UI never invents progress percentages.
+StageStatus = Literal["pending", "running", "completed", "failed"]
+
 
 class RunCreateRequest(BaseModel):
-    """Represent the user input required to execute one pipeline run.
+    """Represent the user input required to enqueue one pipeline run.
 
     Attributes:
         corpus_id: Stable identifier of the selected immutable corpus.
@@ -42,79 +47,127 @@ class RunCreateRequest(BaseModel):
 
 
 class RunChunkingResponse(BaseModel):
-    """Describe the reusable ready chunk artifact selected by a run.
+    """Describe chunking state and its reusable artifact when available.
 
     Attributes:
-        chunk_set_id: Stable identifier of the persisted chunk artifact.
-        status: Ready lifecycle state required for completed runs.
-        chunk_count: Number of ordered chunks in the artifact.
-        reused: Whether the executor reused an existing ready artifact.
+        status: Current lifecycle state of the chunking stage.
+        chunk_set_id: Ready chunk artifact identifier after chunking succeeds.
+        chunk_count: Number of chunks in the ready artifact.
+        reused: Whether this run reused an existing compatible artifact.
+        duration_ms: Time this run spent resolving the chunking stage.
     """
 
-    chunk_set_id: str
-    status: Literal["ready"]
-    chunk_count: int = Field(ge=0)
-    reused: bool
+    status: StageStatus
+    chunk_set_id: str | None = None
+    chunk_count: int | None = Field(default=None, ge=0)
+    reused: bool | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+
+
+class RunEmbeddingResponse(BaseModel):
+    """Describe embedding state, configuration, and artifact when available.
+
+    Attributes:
+        status: Current lifecycle state of the embedding stage.
+        vector_index_id: Ready vector-index identifier after embedding succeeds.
+        vector_count: Number of vectors stored in the ready index.
+        dimensions: Width of every vector in the index.
+        provider: Backend-registered provider from the immutable run snapshot.
+        model: Provider model identifier from the immutable run snapshot.
+        distance_metric: Distance space used by the vector collection.
+        reused: Whether this run reused a compatible ready vector index.
+        duration_ms: Time this run spent resolving the embedding stage.
+    """
+
+    status: StageStatus
+    vector_index_id: str | None = None
+    vector_count: int | None = Field(default=None, ge=0)
+    dimensions: int | None = Field(default=None, gt=0)
+    provider: str
+    model: str
+    distance_metric: Literal["cosine", "dot_product", "euclidean"]
+    reused: bool | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+
+
+class RunErrorResponse(BaseModel):
+    """Expose a safe terminal pipeline failure to polling clients.
+
+    Attributes:
+        code: Stable machine-readable failure identifier.
+        message: Safe user-readable explanation.
+        stage: Pipeline stage that failed when one had started.
+        details: Additional safe structured provider or validation context.
+    """
+
+    code: str
+    message: str
+    stage: Literal["chunking", "embedding"] | None = None
+    details: dict[str, object] = Field(default_factory=dict)
 
 
 class RunResponse(BaseModel):
-    """Represent one completed immutable run through the chunking stage.
+    """Represent one persisted run at any queue or execution state.
 
     Attributes:
         id: Stable application-generated run identifier.
         corpus_id: Stable identifier of the selected immutable corpus.
         question: Normalized question saved for the run.
         configuration: Resolved immutable configuration snapshot.
-        status: Completed lifecycle state for the currently implemented stages.
-        created_at: UTC timestamp when the pending run was persisted.
-        started_at: UTC timestamp when pipeline execution began.
-        completed_at: UTC timestamp when chunking completed.
-        duration_ms: Total execution duration through chunking.
-        chunking: Compact ready chunk-set summary without chunk bodies.
+        status: Overall persisted lifecycle state.
+        current_stage: Stage currently executing, or ``None`` when inactive.
+        created_at: UTC timestamp when the run was enqueued.
+        started_at: UTC timestamp when a worker claimed the run.
+        completed_at: UTC timestamp when the run reached a terminal state.
+        duration_ms: Total execution duration for a terminal run.
+        chunking: Current chunking state and optional artifact summary.
+        embedding: Current embedding state and optional artifact summary.
+        error: Safe structured failure for a failed run.
     """
 
     id: str
     corpus_id: str
     question: str
     configuration: PipelineConfig
-    status: Literal["completed"]
+    status: RunStatus
+    current_stage: Literal["chunking", "embedding"] | None = None
     created_at: str
-    started_at: str
-    completed_at: str
-    duration_ms: int = Field(ge=0)
+    started_at: str | None = None
+    completed_at: str | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
     chunking: RunChunkingResponse
+    embedding: RunEmbeddingResponse
+    error: RunErrorResponse | None = None
 
 
 @router.post(
     "/runs",
     response_model=RunResponse,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
-async def create_pipeline_run(
-    payload: RunCreateRequest,
-    executor: Annotated[PipelineExecutor, Depends(get_pipeline_executor)],
-) -> RunResponse:
-    """Validate, persist, and execute one run through chunking.
+async def create_pipeline_run(payload: RunCreateRequest) -> RunResponse:
+    """Validate and enqueue one run without waiting for provider execution.
 
     Args:
         payload: Selected corpus, question, and complete pipeline configuration.
-        executor: Injected coordinator for run lifecycle and pipeline stages.
 
     Returns:
-        Completed run linked to one ready reusable chunk set.
+        Persisted pending run suitable for polling through ``GET /runs/{id}``.
 
     Raises:
-        HTTPException: If validation, chunking, or persistence fails.
+        HTTPException: If request validation or pending-run persistence fails.
     """
-
     normalized_question = payload.question.strip()
     logger.info(
-        "pipeline_run_requested corpus_id=%s chunking_strategy=%s",
+        "pipeline_run_requested corpus_id=%s chunking_strategy=%s "
+        "embedding_provider=%s embedding_model=%s",
         payload.corpus_id,
         payload.configuration.chunking.strategy.value,
+        payload.configuration.embedding.provider,
+        payload.configuration.embedding.model,
     )
 
-    # Reject blank questions before creating an immutable run record.
+    # Reject blank questions before creating an immutable queue record.
     if not normalized_question:
         logger.warning(
             "pipeline_run_rejected corpus_id=%s error_code=invalid_question",
@@ -129,13 +182,10 @@ async def create_pipeline_run(
         )
 
     try:
-        # Validate semantic compatibility before any run lifecycle row is created.
+        # Resolve catalog compatibility before enqueueing an immutable snapshot.
         options = _load_pipeline_options()
         validate_pipeline_config(payload.configuration, options)
-
-        # Tokenization and SQLite are synchronous, so execute them off the event loop.
-        persisted_run = await run_in_threadpool(
-            executor.execute,
+        persisted_run = create_pending_run(
             payload.corpus_id,
             normalized_question,
             payload.configuration,
@@ -145,8 +195,6 @@ async def create_pipeline_run(
             "pipeline_run_rejected corpus_id=%s error_code=corpus_not_found",
             payload.corpus_id,
         )
-
-        # Unknown corpora fail before pending-run creation and therefore have no run ID.
         raise HTTPException(
             status_code=404,
             detail={
@@ -161,8 +209,6 @@ async def create_pipeline_run(
             payload.corpus_id,
             error.field,
         )
-
-        # Return the incompatible field without exposing internal adapter details.
         raise HTTPException(
             status_code=422,
             detail={
@@ -171,37 +217,12 @@ async def create_pipeline_run(
                 "field": error.field,
             },
         ) from error
-    except PipelineRunExecutionError as error:
-        logger.warning(
-            "pipeline_run_failed run_id=%s corpus_id=%s error_code=%s",
-            error.run_id,
-            payload.corpus_id,
-            error.code,
-        )
-
-        # State conflicts are repairable inputs; all other execution failures are server-side.
-        failure_status = (
-            409
-            if error.code in {"empty_corpus", "missing_parse_artifact"}
-            else 404
-            if error.code == "corpus_not_found"
-            else 500
-        )
-        detail = {
-            "code": error.code,
-            "message": error.message,
-            "run_id": error.run_id,
-            **error.details,
-        }
-        raise HTTPException(status_code=failure_status, detail=detail) from error
     except (OSError, ValidationError) as error:
         logger.exception(
             "pipeline_run_rejected corpus_id=%s "
             "error_code=pipeline_options_unavailable",
             payload.corpus_id,
         )
-
-        # Match the options endpoint when its version-controlled catalog is unavailable.
         raise HTTPException(
             status_code=500,
             detail={
@@ -211,16 +232,59 @@ async def create_pipeline_run(
         ) from error
     except sqlite3.Error as error:
         logger.exception(
-            "pipeline_run_failed corpus_id=%s error_code=persistence_error",
+            "pipeline_run_rejected corpus_id=%s error_code=persistence_error",
             payload.corpus_id,
         )
-
-        # Hide database internals behind a stable persistence error response.
         raise HTTPException(
             status_code=500,
             detail={
                 "code": "persistence_error",
                 "message": "The pipeline run could not be saved.",
+            },
+        ) from error
+
+    logger.info(
+        "pipeline_run_enqueued run_id=%s corpus_id=%s",
+        persisted_run["id"],
+        payload.corpus_id,
+    )
+    return RunResponse.model_validate(persisted_run)
+
+
+@router.get("/runs/{run_id}", response_model=RunResponse)
+async def read_pipeline_run(run_id: str) -> RunResponse:
+    """Return the latest persisted state of one pipeline run.
+
+    Args:
+        run_id: Stable identifier returned by ``POST /runs``.
+
+    Returns:
+        Current pending, running, completed, or failed run representation.
+
+    Raises:
+        HTTPException: If the run is unknown or cannot be read.
+    """
+    try:
+        # This short local SQLite read contains no parsing or provider work.
+        persisted_run = get_run(run_id)
+    except RunNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "run_not_found",
+                "message": "The selected pipeline run does not exist.",
+            },
+        ) from error
+    except sqlite3.Error as error:
+        logger.exception(
+            "pipeline_run_read_failed run_id=%s error_code=persistence_error",
+            run_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "persistence_error",
+                "message": "The pipeline run could not be read.",
             },
         ) from error
 

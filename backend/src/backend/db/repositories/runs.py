@@ -1,4 +1,4 @@
-"""SQLite persistence boundaries for immutable pipeline-run execution state."""
+"""SQLite persistence boundaries for queued immutable pipeline runs."""
 
 import json
 from datetime import datetime, timezone
@@ -14,15 +14,19 @@ class CorpusNotFoundError(LookupError):
 
 
 class RunNotFoundError(LookupError):
-    """Report that a lifecycle update references an unknown run."""
+    """Report that a lifecycle operation references an unknown run."""
 
 
 class InvalidRunStateError(RuntimeError):
-    """Report an attempted pipeline-run lifecycle transition from the wrong state."""
+    """Report a pipeline-run transition from an incompatible state or stage."""
 
 
 class ChunkSetNotReadyError(RuntimeError):
-    """Report that run completion references a chunk set that is not ready."""
+    """Report that a stage references a chunk set that is not ready."""
+
+
+class VectorIndexNotReadyError(RuntimeError):
+    """Report that run completion references a vector index that is not ready."""
 
 
 def _utc_timestamp() -> str:
@@ -49,7 +53,7 @@ def _canonical_json(value: Any) -> str:
     Returns:
         Compact JSON text with stable key ordering.
     """
-    # Stable JSON keeps immutable snapshots and tests independent of dict insertion order.
+    # Stable JSON keeps snapshots and tests independent of dictionary insertion order.
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
@@ -58,12 +62,12 @@ def create_pending_run(
     question: str,
     configuration: PipelineConfig,
 ) -> dict[str, Any]:
-    """Persist one validated run before its first pipeline stage starts.
+    """Persist one validated run before the background worker claims it.
 
     Args:
         corpus_id: Stable identifier of the immutable corpus selected for the run.
         question: Normalized non-empty question submitted by the user.
-        configuration: Typed configuration with all backend defaults resolved.
+        configuration: Typed configuration with every backend default resolved.
 
     Returns:
         Materialized pending run with its immutable configuration snapshot.
@@ -75,24 +79,29 @@ def create_pending_run(
     created_at = _utc_timestamp()
     effective_config_json = _canonical_json(configuration.model_dump(mode="json"))
 
-    # Verify corpus existence and create the pending run in one transaction.
+    # Validate the corpus and enqueue the run in one transaction.
     with connect() as connection:
         corpus = connection.execute(
-            "SELECT id FROM corpus WHERE id = ?",
-            (corpus_id,),
+            "SELECT id FROM corpus WHERE id = ?", (corpus_id,)
         ).fetchone()
 
-        # Return a domain error instead of exposing a foreign-key failure.
+        # Surface a domain error instead of leaking a foreign-key failure.
         if corpus is None:
             raise CorpusNotFoundError(corpus_id)
 
         connection.execute(
             """
             INSERT INTO pipeline_run (
-                id, corpus_id, chunk_set_id, question, effective_config_json,
-                status, chunk_set_reused, created_at, started_at,
-                completed_at, duration_ms, error_code, error_details_json
-            ) VALUES (?, ?, NULL, ?, ?, 'pending', NULL, ?, NULL, NULL, NULL, NULL, NULL)
+                id, corpus_id, chunk_set_id, vector_index_id, question,
+                effective_config_json, status, current_stage,
+                chunk_set_reused, vector_index_reused,
+                chunking_duration_ms, embedding_duration_ms,
+                created_at, started_at, completed_at, duration_ms,
+                error_code, error_details_json
+            ) VALUES (
+                ?, ?, NULL, NULL, ?, ?, 'pending', NULL,
+                NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL
+            )
             """,
             (run_id, corpus_id, question, effective_config_json, created_at),
         )
@@ -100,35 +109,176 @@ def create_pending_run(
     return get_run(run_id)
 
 
-def mark_run_running(run_id: str) -> dict[str, Any]:
-    """Move one pending run into active execution.
+def claim_next_pending_run() -> dict[str, Any] | None:
+    """Atomically claim the oldest queued run for background execution.
 
     Args:
-        run_id: Stable identifier of the pending run to start.
+        None.
 
     Returns:
-        Materialized running state after the transition.
-
-    Raises:
-        InvalidRunStateError: If the run is absent or no longer pending.
+        Claimed running run, or ``None`` when the queue is empty.
     """
     started_at = _utc_timestamp()
 
-    # Conditional update prevents terminal or concurrently started runs being overwritten.
+    # An immediate transaction serializes competing workers before queue selection.
     with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """
+            SELECT id FROM pipeline_run
+            WHERE status = 'pending'
+            ORDER BY created_at, id
+            LIMIT 1
+            """
+        ).fetchone()
+
+        # Leave the queue unchanged when there is no work to claim.
+        if row is None:
+            return None
+
+        run_id = row["id"]
         cursor = connection.execute(
             """
             UPDATE pipeline_run
-            SET status = 'running', started_at = ?
+            SET status = 'running', current_stage = 'chunking', started_at = ?
             WHERE id = ? AND status = 'pending'
             """,
             (started_at, run_id),
         )
 
-        # A zero-row update means the requested lifecycle transition is invalid.
+        # A serialized claim should update exactly the selected pending row.
+        if cursor.rowcount != 1:
+            raise InvalidRunStateError(f"Pipeline run '{run_id}' could not be claimed.")
+
+    return get_run(run_id)
+
+
+def fail_interrupted_runs() -> int:
+    """Fail runs abandoned while the previous backend process was executing.
+
+    Args:
+        None.
+
+    Returns:
+        Number of stale running rows moved to a terminal failed state.
+    """
+    completed_at = _utc_timestamp()
+
+    # Capture each active stage so polling clients receive an accurate failure stage.
+    with connect() as connection:
+        rows = connection.execute(
+            "SELECT id, current_stage FROM pipeline_run WHERE status = 'running'"
+        ).fetchall()
+
+        # Persist one safe terminal failure for every process-abandoned run.
+        for row in rows:
+            stage = row["current_stage"] or "chunking"
+            error_details = _canonical_json(
+                {
+                    "stage": stage,
+                    "message": "The backend stopped while this run was executing.",
+                }
+            )
+            connection.execute(
+                """
+                UPDATE pipeline_run
+                SET status = 'failed', current_stage = NULL,
+                    completed_at = ?, duration_ms = 0,
+                    error_code = 'run_interrupted', error_details_json = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (completed_at, error_details, row["id"]),
+            )
+
+    return len(rows)
+
+
+def get_run_execution_input(run_id: str) -> dict[str, Any]:
+    """Load the immutable inputs required by the background executor.
+
+    Args:
+        run_id: Stable identifier of the claimed running run.
+
+    Returns:
+        Corpus ID, question, and validated effective pipeline configuration.
+
+    Raises:
+        RunNotFoundError: If the requested run does not exist.
+        InvalidRunStateError: If the run is not actively executing.
+    """
+    # Read the complete snapshot so the worker never depends on request memory.
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT corpus_id, question, effective_config_json, status
+            FROM pipeline_run WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+    # Keep absence distinct from an invalid lifecycle transition.
+    if row is None:
+        raise RunNotFoundError(run_id)
+
+    # Only a successfully claimed row may enter the pipeline executor.
+    if row["status"] != "running":
+        raise InvalidRunStateError(f"Pipeline run '{run_id}' is not running.")
+
+    return {
+        "corpus_id": row["corpus_id"],
+        "question": row["question"],
+        "configuration": PipelineConfig.model_validate_json(
+            row["effective_config_json"]
+        ),
+    }
+
+
+def record_chunking_result(
+    run_id: str,
+    chunk_set_id: str,
+    reused: bool,
+    duration_ms: int,
+) -> dict[str, Any]:
+    """Attach a ready chunk artifact and advance a running run to embedding.
+
+    Args:
+        run_id: Stable identifier of the running pipeline execution.
+        chunk_set_id: Ready reusable chunk artifact produced by chunking.
+        reused: Whether the chunk artifact already existed.
+        duration_ms: Time this run spent resolving the chunking stage.
+
+    Returns:
+        Materialized running run now positioned at embedding.
+
+    Raises:
+        ChunkSetNotReadyError: If the supplied chunk artifact is not ready.
+        InvalidRunStateError: If the run is not actively chunking.
+    """
+    # Validate the upstream artifact and stage transition together.
+    with connect() as connection:
+        chunk_set = connection.execute(
+            "SELECT id FROM chunk_set WHERE id = ? AND status = 'ready'",
+            (chunk_set_id,),
+        ).fetchone()
+
+        # Never expose a partial chunk set to the embedding stage.
+        if chunk_set is None:
+            raise ChunkSetNotReadyError(chunk_set_id)
+
+        cursor = connection.execute(
+            """
+            UPDATE pipeline_run
+            SET chunk_set_id = ?, chunk_set_reused = ?,
+                chunking_duration_ms = ?, current_stage = 'embedding'
+            WHERE id = ? AND status = 'running' AND current_stage = 'chunking'
+            """,
+            (chunk_set_id, int(reused), duration_ms, run_id),
+        )
+
+        # Protect terminal or concurrently changed run history.
         if cursor.rowcount != 1:
             raise InvalidRunStateError(
-                f"Pipeline run '{run_id}' cannot transition to running."
+                f"Pipeline run '{run_id}' cannot advance to embedding."
             )
 
     return get_run(run_id)
@@ -136,56 +286,60 @@ def mark_run_running(run_id: str) -> dict[str, Any]:
 
 def complete_run(
     run_id: str,
-    chunk_set_id: str,
-    chunk_set_reused: bool,
-    duration_ms: int,
+    vector_index_id: str,
+    vector_index_reused: bool,
+    embedding_duration_ms: int,
+    total_duration_ms: int,
 ) -> dict[str, Any]:
-    """Complete a running run with its exact ready chunk artifact.
+    """Complete a running run with its exact ready vector index.
 
     Args:
         run_id: Stable identifier of the running pipeline execution.
-        chunk_set_id: Ready reusable chunk artifact selected by the executor.
-        chunk_set_reused: Whether this execution reused an existing artifact.
-        duration_ms: Non-negative elapsed execution time in milliseconds.
+        vector_index_id: Ready reusable vector index selected by the executor.
+        vector_index_reused: Whether this execution reused the index.
+        embedding_duration_ms: Time spent resolving the embedding stage.
+        total_duration_ms: Total background pipeline duration.
 
     Returns:
-        Materialized completed run and compact chunking summary.
+        Materialized completed run with both reusable artifacts.
 
     Raises:
-        ChunkSetNotReadyError: If the supplied artifact is absent or not ready.
-        InvalidRunStateError: If the run is absent or no longer running.
+        VectorIndexNotReadyError: If the vector index is absent or not ready.
+        InvalidRunStateError: If the run is not actively embedding.
     """
     completed_at = _utc_timestamp()
 
-    # Validate the artifact and lifecycle transition in one database transaction.
+    # Validate the final artifact and lifecycle transition in one transaction.
     with connect() as connection:
-        chunk_set = connection.execute(
-            "SELECT id FROM chunk_set WHERE id = ? AND status = 'ready'",
-            (chunk_set_id,),
+        vector_index = connection.execute(
+            "SELECT id FROM vector_index WHERE id = ? AND status = 'ready'",
+            (vector_index_id,),
         ).fetchone()
 
-        # Never attach a partial or failed reusable artifact to a completed run.
-        if chunk_set is None:
-            raise ChunkSetNotReadyError(chunk_set_id)
+        # A completed run may only reference a fully materialized vector collection.
+        if vector_index is None:
+            raise VectorIndexNotReadyError(vector_index_id)
 
         cursor = connection.execute(
             """
             UPDATE pipeline_run
-            SET chunk_set_id = ?, status = 'completed', chunk_set_reused = ?,
-                completed_at = ?, duration_ms = ?, error_code = NULL,
-                error_details_json = NULL
-            WHERE id = ? AND status = 'running'
+            SET vector_index_id = ?, vector_index_reused = ?,
+                embedding_duration_ms = ?, status = 'completed',
+                current_stage = NULL, completed_at = ?, duration_ms = ?,
+                error_code = NULL, error_details_json = NULL
+            WHERE id = ? AND status = 'running' AND current_stage = 'embedding'
             """,
             (
-                chunk_set_id,
-                int(chunk_set_reused),
+                vector_index_id,
+                int(vector_index_reused),
+                embedding_duration_ms,
                 completed_at,
-                duration_ms,
+                total_duration_ms,
                 run_id,
             ),
         )
 
-        # Protect completed and failed history from accidental later mutation.
+        # Preserve immutable terminal history if the run was already changed.
         if cursor.rowcount != 1:
             raise InvalidRunStateError(
                 f"Pipeline run '{run_id}' cannot transition to completed."
@@ -206,10 +360,10 @@ def fail_run(
         run_id: Stable identifier of the running pipeline execution.
         error_code: Machine-readable failure category.
         error_details: Safe JSON details without raw exceptions or traces.
-        duration_ms: Non-negative elapsed execution time in milliseconds.
+        duration_ms: Non-negative total execution time in milliseconds.
 
     Returns:
-        Materialized failed run.
+        Materialized failed run retaining any successful upstream artifact.
 
     Raises:
         InvalidRunStateError: If the run is absent or no longer running.
@@ -217,22 +371,17 @@ def fail_run(
     completed_at = _utc_timestamp()
     error_details_json = _canonical_json(error_details)
 
-    # Conditional update preserves immutable terminal states under retries or races.
+    # Conditional update protects immutable terminal history from later retries.
     with connect() as connection:
         cursor = connection.execute(
             """
             UPDATE pipeline_run
-            SET status = 'failed', completed_at = ?, duration_ms = ?,
+            SET status = 'failed', current_stage = NULL,
+                completed_at = ?, duration_ms = ?,
                 error_code = ?, error_details_json = ?
             WHERE id = ? AND status = 'running'
             """,
-            (
-                completed_at,
-                duration_ms,
-                error_code,
-                error_details_json,
-                run_id,
-            ),
+            (completed_at, duration_ms, error_code, error_details_json, run_id),
         )
 
         # Never rewrite an already-terminal historical run.
@@ -245,64 +394,120 @@ def fail_run(
 
 
 def get_run(run_id: str) -> dict[str, Any]:
-    """Load one run together with its linked chunk-set summary.
+    """Load one run with stage state and compact reusable-artifact summaries.
 
     Args:
         run_id: Stable identifier of the pipeline run to materialize.
 
     Returns:
-        JSON-friendly run dictionary with optional chunking details.
+        JSON-friendly run dictionary suitable for API polling.
 
     Raises:
         RunNotFoundError: If the run does not exist.
     """
-    # Join the reusable artifact so transport code never performs persistence queries.
+    # Join both reusable artifacts so API code does not perform persistence queries.
     with connect() as connection:
         row = connection.execute(
             """
-            SELECT pipeline_run.id, pipeline_run.corpus_id,
-                   pipeline_run.chunk_set_id, pipeline_run.question,
-                   pipeline_run.effective_config_json, pipeline_run.status,
-                   pipeline_run.chunk_set_reused, pipeline_run.created_at,
-                   pipeline_run.started_at, pipeline_run.completed_at,
-                   pipeline_run.duration_ms, pipeline_run.error_code,
-                   pipeline_run.error_details_json, chunk_set.status AS chunk_set_status,
-                   chunk_set.chunk_count
+            SELECT pipeline_run.*,
+                   chunk_set.status AS chunk_set_status,
+                   chunk_set.chunk_count,
+                   vector_index.status AS vector_index_status,
+                   vector_index.vector_count,
+                   vector_index.dimensions,
+                   vector_index.provider AS index_provider,
+                   vector_index.model AS index_model,
+                   vector_index.distance_metric AS index_distance_metric
             FROM pipeline_run
             LEFT JOIN chunk_set ON chunk_set.id = pipeline_run.chunk_set_id
+            LEFT JOIN vector_index
+                ON vector_index.id = pipeline_run.vector_index_id
             WHERE pipeline_run.id = ?
             """,
             (run_id,),
         ).fetchone()
 
-    # Keep absence distinct from an invalid lifecycle transition.
+    # Keep a missing run distinct from every lifecycle state.
     if row is None:
         raise RunNotFoundError(run_id)
 
-    chunking: dict[str, Any] | None = None
+    configuration = json.loads(row["effective_config_json"])
+    error_details = (
+        json.loads(row["error_details_json"])
+        if row["error_details_json"] is not None
+        else None
+    )
+    failed_stage = error_details.get("stage") if error_details else None
 
-    # Completed runs expose only compact artifact metadata, never complete chunk text.
+    # Derive chunking state from the persisted stage and attached artifact.
     if row["chunk_set_id"] is not None:
-        chunking = {
-            "chunk_set_id": row["chunk_set_id"],
-            "status": row["chunk_set_status"],
-            "chunk_count": row["chunk_count"],
-            "reused": bool(row["chunk_set_reused"]),
+        chunking_status = "completed"
+    elif row["status"] == "running" and row["current_stage"] == "chunking":
+        chunking_status = "running"
+    elif row["status"] == "failed" and failed_stage == "chunking":
+        chunking_status = "failed"
+    else:
+        chunking_status = "pending"
+
+    # Embedding can start only after chunking has attached its ready artifact.
+    if row["vector_index_id"] is not None:
+        embedding_status = "completed"
+    elif row["status"] == "running" and row["current_stage"] == "embedding":
+        embedding_status = "running"
+    elif row["status"] == "failed" and failed_stage == "embedding":
+        embedding_status = "failed"
+    else:
+        embedding_status = "pending"
+
+    error: dict[str, Any] | None = None
+
+    # Materialize one safe polling error without exposing serialized storage details.
+    if row["error_code"] is not None:
+        error = {
+            "code": row["error_code"],
+            "message": error_details.get("message", "The pipeline run failed."),
+            "stage": failed_stage,
+            "details": {
+                key: value
+                for key, value in (error_details or {}).items()
+                if key not in {"message", "stage"}
+            },
         }
 
+    embedding_configuration = configuration["embedding"]
     return {
         "id": row["id"],
         "corpus_id": row["corpus_id"],
         "question": row["question"],
-        "configuration": json.loads(row["effective_config_json"]),
+        "configuration": configuration,
         "status": row["status"],
+        "current_stage": row["current_stage"],
         "created_at": row["created_at"],
         "started_at": row["started_at"],
         "completed_at": row["completed_at"],
         "duration_ms": row["duration_ms"],
-        "error_code": row["error_code"],
-        "error_details": json.loads(row["error_details_json"])
-        if row["error_details_json"] is not None
-        else None,
-        "chunking": chunking,
+        "chunking": {
+            "status": chunking_status,
+            "chunk_set_id": row["chunk_set_id"],
+            "chunk_count": row["chunk_count"],
+            "reused": bool(row["chunk_set_reused"])
+            if row["chunk_set_reused"] is not None
+            else None,
+            "duration_ms": row["chunking_duration_ms"],
+        },
+        "embedding": {
+            "status": embedding_status,
+            "vector_index_id": row["vector_index_id"],
+            "vector_count": row["vector_count"],
+            "dimensions": row["dimensions"],
+            "provider": row["index_provider"] or embedding_configuration["provider"],
+            "model": row["index_model"] or embedding_configuration["model"],
+            "distance_metric": row["index_distance_metric"]
+            or embedding_configuration["distance_metric"],
+            "reused": bool(row["vector_index_reused"])
+            if row["vector_index_reused"] is not None
+            else None,
+            "duration_ms": row["embedding_duration_ms"],
+        },
+        "error": error,
     }

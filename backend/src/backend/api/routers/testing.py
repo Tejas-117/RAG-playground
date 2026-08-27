@@ -6,7 +6,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Response
 
 from backend.api.routers.uploads import UPLOADS_DIRECTORY
-from backend.maintenance import clear_database_data, clear_uploads_directory
+from backend.embedding.models import VectorStoreError
+from backend.maintenance import (
+    clear_database_data,
+    clear_uploads_directory,
+    clear_vector_store_data,
+)
 
 router = APIRouter()
 
@@ -28,7 +33,21 @@ def reset_testing_data(response: Response) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
 
     try:
-        # Clear relational data first so a database failure leaves upload files untouched.
+        # Remove external collections before deleting their relational provenance.
+        deleted_vector_collections = clear_vector_store_data()
+    except VectorStoreError as error:
+        # Leave SQLite references intact when their external collections remain uncertain.
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "vector_store_reset_failed",
+                "message": "The testing vector-store data could not be cleared.",
+            },
+            headers={"Cache-Control": "no-store"},
+        ) from error
+
+    try:
+        # Clear relational data after its external vector collections are gone.
         deleted_database_rows = clear_database_data()
     except sqlite3.Error as error:
         # Return a stable error code without exposing SQLite details.
@@ -37,6 +56,7 @@ def reset_testing_data(response: Response) -> dict[str, Any]:
             detail={
                 "code": "database_reset_failed",
                 "message": "The testing database data could not be cleared.",
+                "vector_store_cleared": True,
             },
             headers={"Cache-Control": "no-store"},
         ) from error
@@ -62,5 +82,6 @@ def reset_testing_data(response: Response) -> dict[str, Any]:
     return {
         "message": "Testing data cleared successfully.",
         "deleted_database_rows": deleted_database_rows,
+        "deleted_vector_collections": deleted_vector_collections,
         "deleted_upload_files": deleted_upload_files,
     }

@@ -1,14 +1,46 @@
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routers import corpora, pipeline_options, runs, testing, uploads
+from backend.db.repositories.runs import fail_interrupted_runs
 from backend.logging_config import configure_logging
+from backend.pipeline.worker import PipelineRunWorker
 
 # Configure application loggers before routes begin handling requests.
 configure_logging()
 
-app = FastAPI(title="RAG Playground API")
+
+@asynccontextmanager
+async def application_lifespan(application: FastAPI) -> AsyncIterator[None]:
+    """Recover interrupted jobs and own the local background worker lifecycle.
+
+    Args:
+        application: FastAPI application entering or leaving its lifespan.
+
+    Yields:
+        Control while the API and background worker are available.
+    """
+    # Terminalize work abandoned by a previous process before claiming queued jobs.
+    fail_interrupted_runs()
+    worker = PipelineRunWorker()
+    worker_task = asyncio.create_task(worker.run_forever())
+
+    try:
+        # Serve requests while the independently persisted worker processes runs.
+        yield
+    finally:
+        # Cancel the polling coroutine; active state remains recoverable in SQLite.
+        worker_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker_task
+
+
+app = FastAPI(title="RAG Playground API", lifespan=application_lifespan)
 
 app.add_middleware(
     CORSMiddleware,

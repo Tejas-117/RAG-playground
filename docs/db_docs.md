@@ -64,8 +64,8 @@ result rather than split the documents again.
 ## `chunk`
 
 Represents one ordered text segment within a `chunk_set`. Chunk rows and their
-source provenance live in SQLite; vector embeddings and vector-search indexes
-will live in Chroma and refer back to this stable `chunk.id`.
+source provenance live in SQLite; vector coordinates live in Chroma and refer
+back to this stable `chunk.id`.
 
 | Field | Description |
 | --- | --- |
@@ -80,26 +80,53 @@ will live in Chroma and refer back to this stable `chunk.id`.
 | `section_path_json` | Optional ordered heading/section path for source display and filtering. |
 | `source_metadata_json` | Non-null JSON object containing parser/source metadata retained for provenance. |
 
-Parsing executes during upload. Chunking executes from `POST /runs` and writes
-or reuses these persisted artifacts before the run completes.
+Parsing executes during upload. A queued run invokes chunking and writes or
+reuses this artifact before embedding begins.
+
+## `vector_index`
+
+Represents one complete reusable embedding space for an exact chunk artifact.
+SQLite stores compatibility and lifecycle provenance; the vector coordinates
+remain in the named Chroma collection.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable deterministic identifier for the ready vector-index artifact. |
+| `chunk_set_id` | Exact ready chunk artifact embedded by this index. |
+| `fingerprint` | Unique compatibility hash covering upstream, model, dimensions, policy, metric, and indexer inputs. |
+| `embedding_config_json` | Canonical resolved provider, model, and distance configuration. |
+| `provider` / `model` | Provider and model identifiers selected by the run. |
+| `provider_model` / `provider_revision` | Optional model provenance reported by the provider response. |
+| `dimensions` | Positive shared width of every stored vector. |
+| `distance_metric` | `cosine`, `dot_product`, or `euclidean`. |
+| `input_policy_version` | Versioned document/query text-prefix policy. |
+| `indexer_name` / `indexer_version` | Vector-store implementation identity. |
+| `collection_name` | Unique Chroma collection containing explicit vectors. |
+| `status` | Always `ready`; partial builds are never inserted into SQLite. |
+| `vector_count` | Verified number of records stored in Chroma. |
+| `created_at`, `started_at`, `completed_at`, `duration_ms` | Artifact lifecycle and measured build time. |
 
 ## `pipeline_run`
 
 Represents one immutable single-question run submitted from the experiment
-workbench. The current endpoint executes through chunking; embedding, retrieval,
-generation, and evaluation remain unimplemented.
+workbench. The current background pipeline executes chunking and embedding;
+retrieval, generation, and evaluation remain unimplemented.
 
 | Field | Description |
 | --- | --- |
 | `id` | Stable application-generated identifier for the run. Primary key. |
 | `corpus_id` | Immutable corpus selected for the run. Foreign key to `corpus.id`. |
 | `chunk_set_id` | Nullable while execution is pending or failed; completed runs reference the exact ready `chunk_set` they used. |
+| `vector_index_id` | Nullable until embedding succeeds; completed runs reference the exact ready index they used. |
 | `question` | Trimmed, non-empty question submitted by the user. |
 | `effective_config_json` | Canonical JSON snapshot of the complete typed pipeline configuration, including resolved defaults. |
 | `status` | Run lifecycle: `pending`, `running`, `completed`, or `failed`. |
+| `current_stage` | `chunking` or `embedding` while a worker is executing; otherwise null. |
 | `chunk_set_reused` | Nullable until chunking succeeds; records whether this execution reused an existing ready artifact. |
+| `vector_index_reused` | Nullable until embedding succeeds; records compatible index reuse. |
+| `chunking_duration_ms` / `embedding_duration_ms` | Per-run time spent resolving each implemented stage. |
 | `created_at`, `started_at`, `completed_at` | UTC lifecycle timestamps. |
-| `duration_ms` | Total execution duration through the currently implemented chunking stage. |
+| `duration_ms` | Total execution duration through chunking and embedding. |
 | `error_code` / `error_details_json` | Safe structured terminal failure information without raw traces. |
 
 The question belongs to the run because it is query-specific. It is not stored
@@ -118,11 +145,14 @@ names; `original_filename` remains available for display. The `GET /corpora/`
 route returns the persisted corpus and nested document records.
 
 The `POST /runs` route validates a selected corpus, a single question, and the
-complete pipeline configuration. `PipelineExecutor` creates the lifecycle row,
-builds or reuses its chunk set in a worker thread, and stores the artifact link
-before returning. The snapshot includes optional retrieval and answer metric
-lists, but no later pipeline stages or evaluation results execute yet.
+complete pipeline configuration, stores a `pending` row, and returns `202`
+without waiting for model execution. The application-owned worker atomically
+claims the oldest queued run, builds or reuses its chunk and vector artifacts,
+and persists every stage transition. `GET /runs/{run_id}` returns the latest
+state for polling. The snapshot includes optional retrieval and answer metric
+lists, but those downstream stages do not execute yet.
 
 The development database has no migration compatibility guarantee at this
-stage. After a breaking schema edit, `backend/rag_playground.sqlite3` may be
-recreated; uploaded source files are separate and need not be deleted.
+stage. After this schema edit, recreate `backend/rag_playground.sqlite3` before
+starting the backend. Uploaded source files are separate. Local Chroma data is
+stored under the ignored `backend/chroma_data/` directory by default.

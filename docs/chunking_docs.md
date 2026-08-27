@@ -8,14 +8,16 @@ The backend implements three document-local strategies over persisted
 - `paragraph`
 
 Chunking does not parse source files again and never combines text from separate
-documents. `POST /runs` invokes chunking through `PipelineExecutor`, which
-builds or reuses the exact artifact before completing the run.
+documents. A persisted background worker invokes chunking through
+`PipelineExecutor`, which builds or reuses the exact artifact before handing it
+to embedding.
 
 ## Shared Flow
 
 ```text
 POST /runs + resolved PipelineConfig
-    -> create and start pipeline_run
+    -> persist pending pipeline_run and return 202
+    -> worker claims run and marks chunking active
     -> pass corpus ID + resolved ChunkingConfig to the chunking service
     -> load ordered documents and canonical parses
     -> calculate compatibility fingerprint
@@ -23,7 +25,8 @@ POST /runs + resolved PipelineConfig
     -> tokenize and chunk every document independently
     -> attach page, block, parser, and document provenance
     -> atomically persist chunk_set and chunks
-    -> link chunk_set from pipeline_run and complete the run
+    -> link chunk_set from pipeline_run
+    -> advance the run to embedding
 ```
 
 The process is:
@@ -44,8 +47,8 @@ The process is:
    ordinal, then derive provenance through indexed offset intersection.
 8. Persist the chunk set and all of its chunks in one SQLite transaction, then
    read the completed artifact through the repository boundary.
-9. Store the ready chunk-set ID and reuse flag on the run, then mark it
-   `completed` with execution timestamps and duration.
+9. Store the ready chunk-set ID, reuse flag, and chunking duration on the run,
+   then advance its `current_stage` to `embedding`.
 
 Chunk ordinals start at zero for every source document. Documents are never
 combined, so chunk overlap cannot cross from one document into another.
@@ -68,13 +71,15 @@ rules.
 
 `PipelineExecutor` owns stage ordering and the overall run lifecycle. It does
 not implement tokenization or chunk boundaries; those remain in the chunking
-service and strategy classes. It is the future coordination point for
-embedding, retrieval, generation, and evaluation.
+service and strategy classes. It passes the ready artifact to the implemented
+embedding/index service. Retrieval, generation, and evaluation remain future
+stages.
 
-Chunking runs in FastAPI's thread pool because tokenization and SQLite work are
-synchronous. A successful `POST /runs` response contains only the ready chunk
-set ID, status, chunk count, and reuse flag. Chunk bodies remain internal for
-the embedding stage.
+Chunking runs in a local background worker because tokenization and SQLite work
+are synchronous. `POST /runs` returns the persisted pending run immediately.
+`GET /runs/{run_id}` exposes queued and active stage state, then the ready chunk
+set ID, count, reuse flag, and measured duration. Chunk bodies remain internal
+to the embedding stage.
 
 Failures after run creation are persisted with `failed` status, a stable error
 code, safe structured details, and timing. Chunk-set writes remain atomic, so a

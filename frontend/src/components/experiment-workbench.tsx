@@ -21,9 +21,8 @@ import WorkbenchGridCanvas from "@/components/workbench-grid-canvas";
 import WorkbenchSidebar from "@/components/workbench-sidebar";
 import apiClient, { isAxiosError, isCancel } from "@/lib/axios";
 import {
-  createCompletedExecution,
+  createExecutionView,
   createFailedExecution,
-  createRunningExecution,
   type RunExecutionView,
 } from "@/lib/run-execution";
 import { type CorpusOption, parseCorpora } from "@/validation/corpora";
@@ -69,6 +68,38 @@ type RunNotice = {
   message: string;
   type: "success" | "error";
 };
+
+/** One-second polling keeps persisted progress responsive without pressuring SQLite. */
+const RUN_POLL_INTERVAL_MS = 1_000;
+
+/**
+ * Waits between run-status requests while remaining cancellable on unmount.
+ *
+ * @param signal - Abort signal owned by the active run interaction.
+ * @returns A promise resolved after the fixed polling interval.
+ */
+function waitForRunPoll(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    /** Rejects the pending delay and releases its timer when polling is cancelled. */
+    function handleAbort(): void {
+      window.clearTimeout(timeoutId);
+      reject(new DOMException("Run polling was cancelled.", "AbortError"));
+    }
+
+    // Resolve once before issuing the next persisted-state request.
+    const timeoutId = window.setTimeout(() => {
+      signal.removeEventListener("abort", handleAbort);
+      resolve();
+    }, RUN_POLL_INTERVAL_MS);
+
+    // Cancellation remains responsive even while no HTTP request is active.
+    if (signal.aborted) {
+      handleAbort();
+    } else {
+      signal.addEventListener("abort", handleAbort, { once: true });
+    }
+  });
+}
 
 /**
  * Creates the first editable configuration from backend-supported defaults.
@@ -150,7 +181,7 @@ export default function ExperimentWorkbench() {
   // Stores the backend-neutral execution state rendered below the configuration.
   const [runExecution, setRunExecution] = useState<RunExecutionView | null>(null);
 
-  // Prevents duplicate submissions while the synchronous backend run is executing.
+  // Prevents duplicate submissions while a queued backend run remains active.
   const [isRunSubmitting, setIsRunSubmitting] = useState(false);
 
   // Increments when the user asks to retry both initial API requests.
@@ -161,6 +192,9 @@ export default function ExperimentWorkbench() {
 
   // Stores the corpus search input so the clear action can preserve keyboard focus.
   const corpusSearchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Owns cancellation for the current enqueue request and every subsequent poll.
+  const runAbortControllerRef = useRef<AbortController | null>(null);
 
   // Loads the backend catalog and current corpus inventory whenever a retry is requested.
   useEffect(() => {
@@ -226,6 +260,13 @@ export default function ExperimentWorkbench() {
       abortController.abort();
     };
   }, [loadAttempt]);
+
+  // Cancels active run polling when the workbench leaves the page.
+  useEffect(() => {
+    return () => {
+      runAbortControllerRef.current?.abort();
+    };
+  }, []);
 
   // Limits the source picker to persisted corpus names matching the user's query.
   const filteredCorpora = corpora.filter((corpus) =>
@@ -530,21 +571,49 @@ export default function ExperimentWorkbench() {
     const selectedCorpusName =
       corpora.find((corpus) => corpus.id === selectedCorpusId)?.name || corpusSearch.trim();
 
+    const runAbortController = new AbortController();
+
     setRunNotice(null);
     setIsRunSubmitting(true);
-    setRunExecution(createRunningExecution(selectedCorpusName));
+    setRunExecution(null);
+    runAbortControllerRef.current = runAbortController;
 
     try {
-      const response = await apiClient.post<unknown>("/runs", requestResult.data);
-      const persistedRun = parseRunResponse(response.data);
-
-      setRunExecution(createCompletedExecution(persistedRun, selectedCorpusName));
-
-      setRunNotice({
-        message: `Run ${persistedRun.id} completed chunking.`,
-        type: "success",
+      const response = await apiClient.post<unknown>("/runs", requestResult.data, {
+        signal: runAbortController.signal,
       });
+      let persistedRun = parseRunResponse(response.data);
+
+      setRunExecution(createExecutionView(persistedRun, selectedCorpusName));
+
+      // Poll the stable run resource until the background worker persists an outcome.
+      while (persistedRun.status === "pending" || persistedRun.status === "running") {
+        await waitForRunPoll(runAbortController.signal);
+        const runResponse = await apiClient.get<unknown>(`/runs/${persistedRun.id}`, {
+          signal: runAbortController.signal,
+        });
+        persistedRun = parseRunResponse(runResponse.data);
+        setRunExecution(createExecutionView(persistedRun, selectedCorpusName));
+      }
+
+      // Terminal state determines the notice; provider failures stay attached to the run.
+      if (persistedRun.status === "completed") {
+        setRunNotice({
+          message: `Run ${persistedRun.id} completed chunking and embedding.`,
+          type: "success",
+        });
+      } else {
+        setRunNotice({
+          message: persistedRun.error?.message ?? "The experiment run failed.",
+          type: "error",
+        });
+      }
     } catch (error) {
+      // Unmount cancellation should not create stale UI state.
+      if (isCancel(error) || runAbortController.signal.aborted) {
+        return;
+      }
+
       // Prefer structured API details while retaining a safe fallback for transport failures.
       const apiFailure = isAxiosError(error)
         ? parseRunApiFailure(error.response?.data)
@@ -563,8 +632,15 @@ export default function ExperimentWorkbench() {
         type: "error",
       });
     } finally {
-      // Restore both Run buttons after either a successful response or a failure.
-      setIsRunSubmitting(false);
+      // Clear only the controller owned by this invocation to avoid future races.
+      if (runAbortControllerRef.current === runAbortController) {
+        runAbortControllerRef.current = null;
+
+        // Avoid updating component state after unmount cancellation.
+        if (!runAbortController.signal.aborted) {
+          setIsRunSubmitting(false);
+        }
+      }
     }
   }
 
