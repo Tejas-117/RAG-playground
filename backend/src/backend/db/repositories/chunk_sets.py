@@ -140,6 +140,46 @@ def get_ready_chunk_set(fingerprint: str) -> dict[str, Any] | None:
     return _materialize_chunk_set(chunk_set_row, chunk_rows)
 
 
+def load_chunks_by_ids(
+    chunk_set_id: str,
+    chunk_ids: tuple[str, ...],
+) -> dict[str, dict[str, Any]]:
+    """Load selected chunks belonging to one exact reusable chunk set.
+
+    Args:
+        chunk_set_id: Stable chunk-set identifier expected by retrieval.
+        chunk_ids: Unique stable chunk identifiers returned by vector search.
+
+    Returns:
+        Materialized chunks keyed by ID. Missing or foreign chunks are omitted.
+    """
+    # Avoid constructing invalid SQL when vector search returns no hits.
+    if not chunk_ids:
+        return {}
+
+    # Generate one bound placeholder per ID so all chunks load in one query.
+    placeholders = ",".join("?" for _ in chunk_ids)
+    parameters = (chunk_set_id, *chunk_ids)
+
+    # Scope the lookup to the expected chunk set to enforce artifact ownership.
+    with connect() as connection:
+        chunk_rows = connection.execute(
+            f"""
+            SELECT id, source_document_id, ordinal, text,
+                   character_start_offset, character_end_offset,
+                   token_start_offset, token_end_offset,
+                   page_start, page_end,
+                   section_path_json, source_metadata_json
+            FROM chunk
+            WHERE chunk_set_id = ? AND id IN ({placeholders})
+            """,
+            parameters,
+        ).fetchall()
+
+    # A mapping lets the retrieval service restore vector-search ranking explicitly.
+    return {row["id"]: _materialize_chunk(row) for row in chunk_rows}
+
+
 def save_ready_chunk_set(
     chunk_set: dict[str, Any],
     chunks: list[dict[str, Any]],
@@ -246,24 +286,7 @@ def _materialize_chunk_set(
 
     # Decode persisted JSON fields without exposing storage serialization details.
     for row in chunk_rows:
-        chunks.append(
-            {
-                "id": row["id"],
-                "source_document_id": row["source_document_id"],
-                "ordinal": row["ordinal"],
-                "text": row["text"],
-                "character_start_offset": row["character_start_offset"],
-                "character_end_offset": row["character_end_offset"],
-                "token_start_offset": row["token_start_offset"],
-                "token_end_offset": row["token_end_offset"],
-                "page_start": row["page_start"],
-                "page_end": row["page_end"],
-                "section_path": json.loads(row["section_path_json"])
-                if row["section_path_json"] is not None
-                else None,
-                "source_metadata": json.loads(row["source_metadata_json"]),
-            }
-        )
+        chunks.append(_materialize_chunk(row))
 
     return {
         "id": chunk_set_row["id"],
@@ -279,4 +302,32 @@ def _materialize_chunk_set(
         "completed_at": chunk_set_row["completed_at"],
         "duration_ms": chunk_set_row["duration_ms"],
         "chunks": chunks,
+    }
+
+
+def _materialize_chunk(row: sqlite3.Row) -> dict[str, Any]:
+    """Convert one SQLite chunk row into a JSON-friendly dictionary.
+
+    Args:
+        row: Persisted chunk row containing text, offsets, and JSON provenance.
+
+    Returns:
+        Deserialized chunk fields shared by chunking and retrieval services.
+    """
+    # Decode JSON provenance here so callers never depend on storage serialization.
+    return {
+        "id": row["id"],
+        "source_document_id": row["source_document_id"],
+        "ordinal": row["ordinal"],
+        "text": row["text"],
+        "character_start_offset": row["character_start_offset"],
+        "character_end_offset": row["character_end_offset"],
+        "token_start_offset": row["token_start_offset"],
+        "token_end_offset": row["token_end_offset"],
+        "page_start": row["page_start"],
+        "page_end": row["page_end"],
+        "section_path": json.loads(row["section_path_json"])
+        if row["section_path_json"] is not None
+        else None,
+        "source_metadata": json.loads(row["source_metadata_json"]),
     }
