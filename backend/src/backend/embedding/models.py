@@ -65,6 +65,23 @@ class VectorStoreError(RuntimeError):
     """Hide vector-store-specific exceptions behind one stable boundary."""
 
 
+class InvalidVectorSearchResponseError(VectorStoreError):
+    """Report a vector-search response that cannot represent ranked hits."""
+
+
+@dataclass(frozen=True)
+class VectorSearchHit:
+    """Represent one vector-store match without provider-specific response data.
+
+    Attributes:
+        chunk_id: Stable application chunk identifier stored with the vector.
+        raw_distance: Unmodified distance returned by the configured index space.
+    """
+
+    chunk_id: str
+    raw_distance: float
+
+
 class EmbeddingProvider(Protocol):
     """Define the behavior required from every embedding provider adapter."""
 
@@ -102,7 +119,7 @@ class EmbeddingProvider(Protocol):
 
 
 class VectorStore(Protocol):
-    """Define storage operations needed to materialize a reusable vector index."""
+    """Define provider-neutral vector-index storage and search operations."""
 
     identifier: str
     version: str
@@ -147,6 +164,24 @@ class VectorStore(Protocol):
 
         Returns:
             Non-negative stored record count.
+        """
+        ...
+
+    def query(
+        self,
+        collection_name: str,
+        vector: list[float],
+        top_k: int,
+    ) -> tuple[VectorSearchHit, ...]:
+        """Search one collection with an explicit query vector.
+
+        Args:
+            collection_name: Existing collection containing indexed chunk vectors.
+            vector: Explicit provider-generated query vector.
+            top_k: Maximum number of nearest chunks to return.
+
+        Returns:
+            Ranked immutable hits carrying stable chunk IDs and raw distances.
         """
         ...
 
