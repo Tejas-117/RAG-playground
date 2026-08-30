@@ -6,6 +6,10 @@ from collections.abc import Callable
 from time import perf_counter
 from typing import Any
 
+from backend.db.repositories.generation_results import (
+    GenerationArtifactMismatchError,
+    InvalidGenerationResultError,
+)
 from backend.db.repositories.retrieval_results import (
     InvalidRetrievalResultError,
     RetrievalArtifactMismatchError,
@@ -16,11 +20,12 @@ from backend.db.repositories.runs import (
     RunNotFoundError,
     VectorIndexArtifactMismatchError,
     VectorIndexNotReadyError,
-    complete_run_with_retrieval,
+    complete_run_with_generation,
     fail_run,
     get_run_execution_input,
     record_chunking_result,
     record_embedding_result,
+    record_retrieval_result,
 )
 from backend.embedding.models import (
     EmbeddingAuthenticationError,
@@ -40,6 +45,19 @@ from backend.embedding.service import (
     VectorIndexBuildResult,
     build_or_reuse_vector_index,
 )
+from backend.generation.models import (
+    GenerationAuthenticationError,
+    GenerationInputTooLargeError,
+    GenerationProvider,
+    GenerationProviderError,
+    GenerationProviderUnavailableError,
+    GenerationRateLimitError,
+    GenerationRequestRejectedError,
+    GenerationRequestTimeoutError,
+    GenerationServiceResult,
+    InvalidGenerationResponseError,
+)
+from backend.generation.service import generate_answer
 from backend.ingestion.chunk_sets import (
     ChunkingCorpusNotFoundError,
     ChunkSetBuildResult,
@@ -49,7 +67,12 @@ from backend.ingestion.chunk_sets import (
 )
 from backend.ingestion.chunkers.models import ChunkingTokenizer
 from backend.ingestion.chunkers.tokenizer import TokenizerAssetError
-from backend.pipeline.configs import ChunkingConfig, EmbeddingConfig, RetrievalConfig
+from backend.pipeline.configs import (
+    ChunkingConfig,
+    EmbeddingConfig,
+    GenerationConfig,
+    RetrievalConfig,
+)
 from backend.retrieval.chunk_hydration import ChunkHydrationError
 from backend.retrieval.models import HydratedVectorSearchHit
 from backend.retrieval.service import (
@@ -94,6 +117,18 @@ ChunkRetriever = Callable[
     tuple[HydratedVectorSearchHit, ...],
 ]
 
+# An answer generator consumes the question, exact ranked context, and run settings.
+AnswerGenerator = Callable[
+    [
+        str,
+        GenerationConfig,
+        tuple[HydratedVectorSearchHit, ...],
+        GenerationProvider | None,
+        ChunkingTokenizer | None,
+    ],
+    GenerationServiceResult,
+]
+
 
 class PipelineRunExecutionError(RuntimeError):
     """Expose one safe failed-run result to worker and transport boundaries."""
@@ -128,15 +163,17 @@ class PipelineRunExecutionError(RuntimeError):
 
 
 class PipelineExecutor:
-    """Execute claimed runs through chunking, embedding, and retrieval."""
+    """Execute claimed runs through chunking, embedding, retrieval, and generation."""
 
     def __init__(
         self,
         chunk_set_builder: ChunkSetBuilder = build_or_reuse_chunk_set,
         vector_index_builder: VectorIndexBuilder = build_or_reuse_vector_index,
         chunk_retriever: ChunkRetriever = retrieve_chunks,
+        answer_generator: AnswerGenerator = generate_answer,
         tokenizer: ChunkingTokenizer | None = None,
         embedding_provider: EmbeddingProvider | None = None,
+        generation_provider: GenerationProvider | None = None,
         vector_store: VectorStore | None = None,
     ) -> None:
         """Configure independently testable stage dependencies.
@@ -145,8 +182,10 @@ class PipelineExecutor:
             chunk_set_builder: Service that builds or reuses one chunk set.
             vector_index_builder: Service that builds or reuses one vector index.
             chunk_retriever: Service that searches and hydrates ranked chunks.
+            answer_generator: Service that builds a prompt and generates one answer.
             tokenizer: Optional chunking tokenizer override for deterministic tests.
             embedding_provider: Optional embedding adapter override for tests.
+            generation_provider: Optional generation adapter override for tests.
             vector_store: Optional vector-store adapter override for tests.
 
         Returns:
@@ -155,8 +194,10 @@ class PipelineExecutor:
         self._chunk_set_builder = chunk_set_builder
         self._vector_index_builder = vector_index_builder
         self._chunk_retriever = chunk_retriever
+        self._answer_generator = answer_generator
         self._tokenizer = tokenizer
         self._embedding_provider = embedding_provider
+        self._generation_provider = generation_provider
         self._vector_store = vector_store
 
     def execute(self, run_id: str) -> dict[str, Any]:
@@ -166,7 +207,7 @@ class PipelineExecutor:
             run_id: Stable identifier of a running persisted pipeline job.
 
         Returns:
-            Completed run linked to ready artifacts and its retrieval result.
+            Completed run linked to reusable artifacts, retrieval, and its answer.
 
         Raises:
             PipelineRunExecutionError: If a stage or lifecycle operation fails.
@@ -241,15 +282,13 @@ class PipelineExecutor:
                 self._vector_store,
             )
             retrieval_duration_ms = _elapsed_milliseconds(retrieval_started_counter)
-            total_duration_ms = _elapsed_milliseconds(run_started_counter)
-            completed_run = complete_run_with_retrieval(
+            retrieval_result_id = record_retrieval_result(
                 run_id,
                 embedding_result.artifact["id"],
                 configuration.retrieval.top_k,
                 configuration.embedding.distance_metric,
                 retrieval_hits,
                 retrieval_duration_ms,
-                total_duration_ms,
             )
             logger.info(
                 "pipeline_run_stage_completed run_id=%s corpus_id=%s "
@@ -262,13 +301,49 @@ class PipelineExecutor:
                 configuration.embedding.distance_metric.value,
                 retrieval_duration_ms,
             )
+
+            # Generate from the exact hydrated ranking already persisted for this run.
+            current_stage = "generation"
+            generation_started_counter = perf_counter()
+            generated_answer = self._answer_generator(
+                execution_input["question"],
+                configuration.generation,
+                retrieval_hits,
+                self._generation_provider,
+                self._tokenizer,
+            )
+            generation_duration_ms = _elapsed_milliseconds(generation_started_counter)
+            total_duration_ms = _elapsed_milliseconds(run_started_counter)
+            completed_run = complete_run_with_generation(
+                run_id,
+                retrieval_result_id,
+                configuration.generation,
+                generated_answer,
+                generation_duration_ms,
+                total_duration_ms,
+            )
+            logger.info(
+                "pipeline_run_stage_completed run_id=%s corpus_id=%s "
+                "stage=generation provider=%s model=%s context_chunk_count=%d "
+                "provider_called=%s finish_reason=%s duration_ms=%d",
+                run_id,
+                corpus_id,
+                configuration.generation.provider,
+                configuration.generation.model,
+                len(generated_answer.context_chunk_ids),
+                generated_answer.provider_called,
+                generated_answer.response.finish_reason,
+                generation_duration_ms,
+            )
             logger.info(
                 "pipeline_run_completed run_id=%s corpus_id=%s "
-                "chunk_set_id=%s vector_index_id=%s duration_ms=%d",
+                "chunk_set_id=%s vector_index_id=%s "
+                "retrieval_result_id=%s duration_ms=%d",
                 run_id,
                 corpus_id,
                 chunking_result.artifact["id"],
                 embedding_result.artifact["id"],
+                retrieval_result_id,
                 total_duration_ms,
             )
             return completed_run
@@ -347,11 +422,14 @@ def _map_execution_error(
     if stage == "chunking":
         return _map_chunking_error(run_id, error)
 
-    # Embedding and retrieval reuse adapters but need stage-specific public errors.
+    # Each downstream stage needs distinct public error codes for accurate UX.
     if stage == "embedding":
         return _map_embedding_error(run_id, error)
 
-    return _map_retrieval_error(run_id, error)
+    if stage == "retrieval":
+        return _map_retrieval_error(run_id, error)
+
+    return _map_generation_error(run_id, error)
 
 
 def _map_chunking_error(
@@ -678,6 +756,120 @@ def _map_retrieval_error(
         "retrieval",
         "retrieval_failed",
         "The retrieval stage could not be completed.",
+    )
+
+
+def _map_generation_error(
+    run_id: str,
+    error: Exception,
+) -> PipelineRunExecutionError:
+    """Translate prompt, Groq, or generation-persistence failures safely.
+
+    Args:
+        run_id: Stable identifier of the failed run.
+        error: Exception raised while constructing or generating the answer.
+
+    Returns:
+        Safe generation-stage execution error suitable for persistence.
+    """
+    provider_errors: tuple[tuple[type[Exception], str, str], ...] = (
+        (
+            GenerationProviderUnavailableError,
+            "generation_provider_unavailable",
+            "The generation provider could not complete the request.",
+        ),
+        (
+            GenerationRequestTimeoutError,
+            "generation_request_timeout",
+            "The generation provider request timed out.",
+        ),
+        (
+            GenerationAuthenticationError,
+            "generation_authentication_failed",
+            "The generation provider credentials are missing or were rejected.",
+        ),
+        (
+            GenerationRateLimitError,
+            "generation_rate_limited",
+            "The generation provider rate limit was reached.",
+        ),
+        (
+            GenerationInputTooLargeError,
+            "generation_input_too_large",
+            "The question and retrieved context exceed the model input limit.",
+        ),
+        (
+            GenerationRequestRejectedError,
+            "generation_request_rejected",
+            "The generation provider rejected the model or request.",
+        ),
+        (
+            InvalidGenerationResponseError,
+            "invalid_generation_response",
+            "The generation provider returned an invalid answer response.",
+        ),
+    )
+
+    # Return the first matching provider category without exposing SDK details.
+    for error_type, code, message in provider_errors:
+        if isinstance(error, error_type):
+            return PipelineRunExecutionError(
+                run_id,
+                "generation",
+                code,
+                message,
+            )
+
+    # Prompt budgeting uses the same pinned tokenizer identity as chunking.
+    if isinstance(error, TokenizerAssetError):
+        return PipelineRunExecutionError(
+            run_id,
+            "generation",
+            "generation_tokenizer_unavailable",
+            "The configured generation budgeting tokenizer is unavailable.",
+        )
+
+    # Relational failures preserve retrieval while rejecting partial answer rows.
+    if isinstance(
+        error,
+        (
+            sqlite3.Error,
+            InvalidRunStateError,
+            InvalidGenerationResultError,
+            GenerationArtifactMismatchError,
+            RunNotFoundError,
+        ),
+    ):
+        return PipelineRunExecutionError(
+            run_id,
+            "generation",
+            "generation_persistence_failed",
+            "The generated answer could not be saved.",
+        )
+
+    # A catalog lookup failure indicates a provider/model not executable at runtime.
+    if isinstance(error, LookupError):
+        return PipelineRunExecutionError(
+            run_id,
+            "generation",
+            "generation_request_rejected",
+            "The selected generation model is not registered.",
+        )
+
+    # Hide any other adapter implementation details from persisted failures.
+    if isinstance(error, GenerationProviderError):
+        return PipelineRunExecutionError(
+            run_id,
+            "generation",
+            "generation_failed",
+            "The answer could not be generated.",
+        )
+
+    return PipelineRunExecutionError(
+        run_id,
+        "generation",
+        "generation_failed",
+        "The generation stage could not be completed.",
     )
 
 

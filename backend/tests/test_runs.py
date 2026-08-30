@@ -15,7 +15,7 @@ from backend.db.connection import connect
 from backend.db.repositories.runs import (
     InvalidRunStateError,
     claim_next_pending_run,
-    complete_run_with_retrieval,
+    record_retrieval_result,
 )
 from backend.embedding.models import (
     EmbeddingBatch,
@@ -23,6 +23,11 @@ from backend.embedding.models import (
     EmbeddingProviderUnavailableError,
     VectorSearchHit,
     VectorStoreError,
+)
+from backend.generation.models import (
+    GenerationAuthenticationError,
+    GenerationMessage,
+    GenerationProviderResponse,
 )
 from backend.ingestion.chunkers.models import TokenizedText, TokenOffset
 from backend.ingestion.chunkers.tokenizer import TokenizerAssetError
@@ -146,6 +151,86 @@ class UnavailableRunTestEmbeddingProvider(RunTestEmbeddingProvider):
         """
         # The executor must persist a safe error rather than expose transport internals.
         raise EmbeddingProviderUnavailableError("simulated connection failure")
+
+
+class RunTestGenerationProvider:
+    """Return one deterministic answer without a paid Groq API request."""
+
+    identifier = "run-test-generation-provider"
+    version = "1"
+
+    def policy_version(self, model: str) -> str:
+        """Return the stable request policy used by this fake provider.
+
+        Args:
+            model: Generation model identifier selected by the run.
+
+        Returns:
+            Fixed provider-policy version for persistence assertions.
+        """
+        # Every fake model uses the same request behavior.
+        return "run-test-generation-v1"
+
+    def generate(
+        self,
+        model: str,
+        messages: tuple[GenerationMessage, ...],
+        temperature: float,
+        max_output_tokens: int,
+    ) -> GenerationProviderResponse:
+        """Return a source-citing answer for the supplied deterministic prompt.
+
+        Args:
+            model: Generation model identifier selected by the run.
+            messages: Ordered prompt messages containing retrieved context.
+            temperature: Sampling temperature retained by the request contract.
+            max_output_tokens: Requested completion limit retained by the contract.
+
+        Returns:
+            Fixed answer and usage provenance suitable for pipeline tests.
+        """
+        # The final prompt must carry the persisted refund source for this fixture.
+        if "Refunds are processed" not in messages[-1].content:
+            raise AssertionError("The generation prompt omitted retrieved context.")
+
+        return GenerationProviderResponse(
+            answer_text="Refunds take five business days. [Source 1]",
+            provider_model=model,
+            finish_reason="stop",
+            prompt_tokens=24,
+            completion_tokens=8,
+            total_tokens=32,
+            provider_request_id="request-test-1",
+            system_fingerprint="fingerprint-test-1",
+        )
+
+
+class UnavailableRunTestGenerationProvider(RunTestGenerationProvider):
+    """Simulate missing or rejected Groq backend credentials."""
+
+    def generate(
+        self,
+        model: str,
+        messages: tuple[GenerationMessage, ...],
+        temperature: float,
+        max_output_tokens: int,
+    ) -> GenerationProviderResponse:
+        """Raise the provider-neutral authentication failure.
+
+        Args:
+            model: Generation model that cannot be requested.
+            messages: Prompt messages that cannot be submitted.
+            temperature: Sampling value that cannot be submitted.
+            max_output_tokens: Completion limit that cannot be submitted.
+
+        Returns:
+            Never returns because credentials are unavailable.
+
+        Raises:
+            GenerationAuthenticationError: Always.
+        """
+        # The executor must preserve retrieval while sanitizing credential errors.
+        raise GenerationAuthenticationError("simulated rejected key")
 
 
 class RunTestVectorStore:
@@ -299,8 +384,8 @@ def _run_payload() -> dict[str, object]:
             },
             "retrieval": {},
             "generation": {
-                "provider": "ollama",
-                "model": "llama3.2:3b",
+                "provider": "groq",
+                "model": "openai/gpt-oss-20b",
             },
         },
     }
@@ -330,6 +415,7 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
         self.executor = PipelineExecutor(
             tokenizer=RunTestTokenizer(),
             embedding_provider=RunTestEmbeddingProvider(),
+            generation_provider=RunTestGenerationProvider(),
             vector_store=self.vector_store,
         )
 
@@ -468,6 +554,22 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
             completed_run["embedding"]["vector_count"],
             completed_run["chunking"]["chunk_count"],
         )
+        self.assertEqual(completed_run["retrieval"]["status"], "completed")
+        self.assertEqual(completed_run["retrieval"]["returned_count"], 1)
+        self.assertEqual(
+            completed_run["retrieval"]["chunks"][0]["original_filename"],
+            "refunds.txt",
+        )
+        self.assertEqual(completed_run["generation"]["status"], "completed")
+        self.assertEqual(
+            completed_run["generation"]["answer"],
+            "Refunds take five business days. [Source 1]",
+        )
+        self.assertEqual(completed_run["generation"]["total_tokens"], 32)
+        self.assertEqual(
+            completed_run["generation"]["context_chunks"][0]["retrieval_rank"],
+            1,
+        )
 
         # Retrieval must persist ranked references before the run becomes completed.
         with connect() as connection:
@@ -545,6 +647,37 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(poll_response.status_code, 200)
         self.assertEqual(poll_response.json()["current_stage"], "retrieval")
+
+    async def test_poll_accepts_active_generation_stage(self) -> None:
+        """Verify the API contract represents the active generation lifecycle.
+
+        Args:
+            None.
+
+        Returns:
+            None. Assertions verify generation is an accepted current stage.
+        """
+        enqueue_response = await self._request("POST", "/runs", _run_payload())
+        claimed_run = claim_next_pending_run()
+
+        # Isolate the transport enum without invoking any external provider.
+        with connect() as connection:
+            connection.execute(
+                """
+                UPDATE pipeline_run SET current_stage = 'generation'
+                WHERE id = ? AND status = 'running'
+                """,
+                (claimed_run["id"],),
+            )
+
+        poll_response = await self._request(
+            "GET",
+            f"/runs/{enqueue_response.json()['id']}",
+        )
+
+        self.assertEqual(poll_response.status_code, 200)
+        self.assertEqual(poll_response.json()["current_stage"], "generation")
+        self.assertEqual(poll_response.json()["generation"]["status"], "running")
 
     async def test_enqueue_rejects_invalid_inputs(self) -> None:
         """Verify blank questions and unknown corpora never enter the queue.
@@ -762,6 +895,100 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual((result_count, hit_count), (0, 0))
 
+    async def test_generation_failure_preserves_retrieval_result(self) -> None:
+        """Verify rejected Groq credentials retain all completed upstream output.
+
+        Args:
+            None.
+
+        Returns:
+            None. Assertions cover structured failure and retrieval preservation.
+        """
+        self.executor = PipelineExecutor(
+            tokenizer=RunTestTokenizer(),
+            embedding_provider=RunTestEmbeddingProvider(),
+            generation_provider=UnavailableRunTestGenerationProvider(),
+            vector_store=self.vector_store,
+        )
+        enqueue_response = await self._request("POST", "/runs", _run_payload())
+        claimed_run = claim_next_pending_run()
+
+        # Generation fails only after the complete retrieval result is committed.
+        with self.assertRaises(PipelineRunExecutionError):
+            self.executor.execute(claimed_run["id"])
+
+        poll_response = await self._request(
+            "GET",
+            f"/runs/{enqueue_response.json()['id']}",
+        )
+        failed_run = poll_response.json()
+        self.assertEqual(failed_run["status"], "failed")
+        self.assertEqual(failed_run["retrieval"]["status"], "completed")
+        self.assertEqual(failed_run["retrieval"]["returned_count"], 1)
+        self.assertEqual(failed_run["generation"]["status"], "failed")
+        self.assertEqual(failed_run["error"]["stage"], "generation")
+        self.assertEqual(
+            failed_run["error"]["code"],
+            "generation_authentication_failed",
+        )
+
+        # No answer rows may remain after a terminal generation failure.
+        with connect() as connection:
+            generation_count = connection.execute(
+                "SELECT COUNT(*) FROM generation_result"
+            ).fetchone()[0]
+        self.assertEqual(generation_count, 0)
+
+    async def test_generation_context_write_failure_rolls_back_answer(self) -> None:
+        """Verify answer and context rows share the completion transaction.
+
+        Args:
+            None.
+
+        Returns:
+            None. Assertions cover rollback and retained retrieval provenance.
+        """
+        # Abort the child context write after its answer parent is inserted.
+        with connect() as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER fail_generation_context
+                BEFORE INSERT ON generation_context_chunk
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated context write failure');
+                END
+                """
+            )
+
+        enqueue_response = await self._request("POST", "/runs", _run_payload())
+        claimed_run = claim_next_pending_run()
+
+        # The executor converts the relational failure into a safe terminal state.
+        with self.assertRaises(PipelineRunExecutionError):
+            self.executor.execute(claimed_run["id"])
+
+        failed_run = (
+            await self._request(
+                "GET",
+                f"/runs/{enqueue_response.json()['id']}",
+            )
+        ).json()
+        self.assertEqual(failed_run["error"]["code"], "generation_persistence_failed")
+        self.assertEqual(failed_run["retrieval"]["status"], "completed")
+        self.assertEqual(failed_run["generation"]["status"], "failed")
+
+        # Transaction rollback removes the parent created before the failed child.
+        with connect() as connection:
+            counts = (
+                connection.execute("SELECT COUNT(*) FROM generation_result").fetchone()[
+                    0
+                ],
+                connection.execute(
+                    "SELECT COUNT(*) FROM generation_context_chunk"
+                ).fetchone()[0],
+            )
+        self.assertEqual(counts, (0, 0))
+
     async def test_completed_run_rejects_second_completion(self) -> None:
         """Verify terminal run history cannot be overwritten by a retry.
 
@@ -774,14 +1001,13 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
         await self._request("POST", "/runs", _run_payload())
         completed_run = self._execute_next_run()
 
-        # Repeating a terminal transition must fail instead of mutating history.
+        # Repeating an earlier retrieval transition must fail on terminal history.
         with self.assertRaises(InvalidRunStateError):
-            complete_run_with_retrieval(
+            record_retrieval_result(
                 completed_run["id"],
                 completed_run["embedding"]["vector_index_id"],
                 10,
                 "cosine",
                 (),
                 1,
-                2,
             )

@@ -27,3 +27,29 @@ def test_retrieval_rows_are_deleted_before_their_parent_artifacts() -> None:
     assert DATABASE_DELETE_ORDER.index("retrieval_result") < (
         DATABASE_DELETE_ORDER.index("vector_index")
     )
+
+
+def test_generation_rows_are_deleted_before_retrieval_and_runs() -> None:
+    """Verify reset removes generated answers before their upstream artifacts.
+
+    Args:
+        None.
+
+    Returns:
+        None. Assertions verify generation foreign-key dependencies are ordered.
+    """
+    # Prompt context links depend on both answer and ranked retrieval rows.
+    assert DATABASE_DELETE_ORDER.index("generation_context_chunk") < (
+        DATABASE_DELETE_ORDER.index("generation_result")
+    )
+    assert DATABASE_DELETE_ORDER.index("generation_context_chunk") < (
+        DATABASE_DELETE_ORDER.index("retrieved_chunk")
+    )
+
+    # Generated-answer parents depend on both their run and retrieval result.
+    assert DATABASE_DELETE_ORDER.index("generation_result") < (
+        DATABASE_DELETE_ORDER.index("retrieval_result")
+    )
+    assert DATABASE_DELETE_ORDER.index("generation_result") < (
+        DATABASE_DELETE_ORDER.index("pipeline_run")
+    )

@@ -12,8 +12,8 @@ from backend.api.routers import pipeline_options
 from backend.app import app
 
 
-def test_pipeline_options_expose_requested_ollama_models() -> None:
-    """Verify the MVP catalog contains only the requested Ollama models.
+def test_pipeline_options_expose_requested_generation_models() -> None:
+    """Verify the MVP catalog contains the requested Groq generation models.
 
     Args:
         None. The test reads the version-controlled backend catalog.
@@ -39,15 +39,17 @@ def test_pipeline_options_expose_requested_ollama_models() -> None:
         "nomic-embed-text",
     ]
 
-    # Confirm generation uses the explicit Ollama identifier for Llama 3.2 3B.
+    # Groq generation defaults to the first production GPT-OSS model.
     generation_provider = catalog["generation"]["providers"][0]
-    assert generation_provider["value"] == "ollama"
+    assert generation_provider["value"] == "groq"
     assert [model["value"] for model in generation_provider["models"]] == [
-        "llama3.2:3b"
+        "openai/gpt-oss-20b",
+        "openai/gpt-oss-120b",
+        "llama-3.2-3b-preview",
     ]
     assert generation_provider["models"][0]["capabilities"] == {
         "context_window_tokens": 131072,
-        "max_output_tokens": None,
+        "max_output_tokens": 65536,
     }
 
     # Keep initial multi-selection behavior owned by the backend metric catalog.
@@ -100,13 +102,13 @@ class PipelineOptionsRouteTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             response_data["generation"]["providers"][0]["models"][0]["value"],
-            "llama3.2:3b",
+            "openai/gpt-oss-20b",
         )
         self.assertEqual(
             response_data["generation"]["providers"][0]["models"][0]["capabilities"],
             {
                 "context_window_tokens": 131072,
-                "max_output_tokens": None,
+                "max_output_tokens": 65536,
             },
         )
         self.assertEqual(

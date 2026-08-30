@@ -2,7 +2,7 @@
 
 The retrieval stage embeds one run's saved question, searches the exact ready
 vector index attached to that run, hydrates the ranked chunk IDs from SQLite,
-and persists the immutable result before completing the run.
+and persists the immutable result before advancing the run to generation.
 
 ## Pipeline Flow
 
@@ -15,7 +15,7 @@ embedding completes
   -> query the exact vector collection with configured top_k
   -> hydrate matching chunks from the index's exact chunk_set
   -> atomically persist retrieval_result + retrieved_chunk rows
-  -> record retrieval duration and complete pipeline_run
+  -> record retrieval duration and advance pipeline_run to generation
 ```
 
 `PipelineExecutor` owns this ordering and timing. `retrieve_chunks` owns search
@@ -54,11 +54,12 @@ One run owns at most one `retrieval_result`. Its `retrieved_chunk` children
 store contiguous one-based ranks, stable chunk references, and finite raw
 distances. Chunk text is not duplicated in result rows.
 
-Result insertion and the run's terminal transition share one SQLite
+Result insertion and the run's transition to generation share one SQLite
 transaction. If validation, a child insert, or completion fails, no partial
 result remains. Failures after embedding retain the run's ready `chunk_set_id`
 and `vector_index_id` and expose a safe `retrieval` stage error.
 
-The runs API currently exposes retrieval as an active or failed
-`current_stage`. Returning the persisted retrieval summary and hydrated chunks
-through an API response is intentionally deferred to the next phase.
+The runs API exposes retrieval lifecycle, result summary, labelled raw-distance
+semantics, and hydrated ranked chunks with document, page, offset, and parser
+provenance. Generation records which of these ranks were actually included in
+its bounded prompt.

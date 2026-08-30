@@ -77,6 +77,11 @@ Retrieval is represented by `pipeline_run_stage_completed` with
 hit count, labelled distance metric, and retrieval duration. Retrieval failures
 use `pipeline_run_stage_failed` with a safe retrieval-specific error code.
 
+Generation is represented by `pipeline_run_stage_completed` with
+`stage=generation`. The record contains provider/model identifiers, included
+context count, whether a provider call was required, finish reason, and duration.
+Generation failures use safe stage-specific error codes without provider bodies.
+
 Normal lifecycle transitions use `INFO`. Invalid input and expected rejected
 operations use `WARNING`. Unexpected operational failures use `ERROR` with an
 exception traceback.
@@ -90,10 +95,10 @@ Stage logs contain bounded operational fields such as:
 - parser and chunking strategy names;
 - file, character, page, block, warning, and chunk counts;
 - provider/model identifiers, vector counts and dimensions;
-- stage durations, retrieval hit counts, and artifact reuse decisions; and
+- stage durations, retrieval/context counts, finish reasons, and artifact reuse decisions; and
 - stable error codes.
 
 Logs must not include document text, chunk text, user questions, complete API
-payloads, tokenizer objects, API keys, authorization headers, or provider
+payloads, generated answers, tokenizer objects, API keys, authorization headers, or provider
 secrets. Filenames use their Python representation so control characters cannot
 silently create additional log lines.

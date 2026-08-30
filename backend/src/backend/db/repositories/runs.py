@@ -6,11 +6,21 @@ from typing import Any
 from uuid import uuid4
 
 from backend.db.connection import connect
+from backend.db.repositories.generation_results import (
+    get_generation_result_for_run,
+    insert_generation_result,
+)
 from backend.db.repositories.retrieval_results import (
     RetrievalArtifactMismatchError,
+    get_hydrated_retrieval_result_for_run,
     insert_retrieval_result,
 )
-from backend.pipeline.configs import DistanceMetric, PipelineConfig
+from backend.generation.models import GenerationServiceResult
+from backend.pipeline.configs import (
+    DistanceMetric,
+    GenerationConfig,
+    PipelineConfig,
+)
 from backend.retrieval.models import HydratedVectorSearchHit
 
 
@@ -105,12 +115,12 @@ def create_pending_run(
                 effective_config_json, status, current_stage,
                 chunk_set_reused, vector_index_reused,
                 chunking_duration_ms, embedding_duration_ms,
-                retrieval_duration_ms,
+                retrieval_duration_ms, generation_duration_ms,
                 created_at, started_at, completed_at, duration_ms,
                 error_code, error_details_json
             ) VALUES (
                 ?, ?, NULL, NULL, ?, ?, 'pending', NULL,
-                NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL
+                NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL
             )
             """,
             (run_id, corpus_id, question, effective_config_json, created_at),
@@ -376,16 +386,15 @@ def record_embedding_result(
     return get_run(run_id)
 
 
-def complete_run_with_retrieval(
+def record_retrieval_result(
     run_id: str,
     vector_index_id: str,
     requested_top_k: int,
     distance_metric: DistanceMetric | str,
     hits: tuple[HydratedVectorSearchHit, ...],
     retrieval_duration_ms: int,
-    total_duration_ms: int,
-) -> dict[str, Any]:
-    """Persist ranked retrieval output and complete its run atomically.
+) -> str:
+    """Persist ranked retrieval output and advance its run to generation.
 
     Args:
         run_id: Stable identifier of the running pipeline execution.
@@ -394,10 +403,9 @@ def complete_run_with_retrieval(
         distance_metric: Raw-distance semantics of the searched vector index.
         hits: Ranked hydrated chunks returned by retrieval.
         retrieval_duration_ms: Time spent resolving the retrieval stage.
-        total_duration_ms: Total background pipeline duration.
 
     Returns:
-        Materialized completed run retaining all successful stage artifacts.
+        Stable identifier of the persisted immutable retrieval result.
 
     Raises:
         InvalidRunStateError: If the run is not actively retrieving.
@@ -405,9 +413,7 @@ def complete_run_with_retrieval(
         InvalidRetrievalResultError: If retrieval result values are malformed.
         sqlite3.IntegrityError: If relational persistence rejects any write.
     """
-    completed_at = _utc_timestamp()
-
-    # One transaction prevents either a partial ranked result or false completion.
+    # One transaction prevents partial ranked output or a false stage transition.
     with connect() as connection:
         run = connection.execute(
             """
@@ -424,7 +430,7 @@ def complete_run_with_retrieval(
             or run["current_stage"] != "retrieval"
         ):
             raise InvalidRunStateError(
-                f"Pipeline run '{run_id}' cannot transition to completed."
+                f"Pipeline run '{run_id}' cannot advance to generation."
             )
 
         # Reject an executor result produced from any index other than the attached one.
@@ -433,7 +439,7 @@ def complete_run_with_retrieval(
                 "The searched vector index does not belong to the pipeline run."
             )
 
-        insert_retrieval_result(
+        retrieval_result_id = insert_retrieval_result(
             connection,
             run_id,
             vector_index_id,
@@ -445,15 +451,89 @@ def complete_run_with_retrieval(
         cursor = connection.execute(
             """
             UPDATE pipeline_run
-            SET retrieval_duration_ms = ?, status = 'completed',
-                current_stage = NULL, completed_at = ?, duration_ms = ?,
-                error_code = NULL, error_details_json = NULL
+            SET retrieval_duration_ms = ?, current_stage = 'generation'
             WHERE id = ? AND status = 'running' AND current_stage = 'retrieval'
             """,
-            (retrieval_duration_ms, completed_at, total_duration_ms, run_id),
+            (retrieval_duration_ms, run_id),
         )
 
         # Raising here rolls back both retrieval rows and the lifecycle transition.
+        if cursor.rowcount != 1:
+            raise InvalidRunStateError(
+                f"Pipeline run '{run_id}' cannot advance to generation."
+            )
+
+    return retrieval_result_id
+
+
+def complete_run_with_generation(
+    run_id: str,
+    retrieval_result_id: str,
+    generation_config: GenerationConfig,
+    generation_result: GenerationServiceResult,
+    generation_duration_ms: int,
+    total_duration_ms: int,
+) -> dict[str, Any]:
+    """Persist one generated answer and complete its run atomically.
+
+    Args:
+        run_id: Stable identifier of the running pipeline execution.
+        retrieval_result_id: Exact persisted retrieval output used for the prompt.
+        generation_config: Immutable effective provider and sampling configuration.
+        generation_result: Answer plus exact prompt/provider provenance.
+        generation_duration_ms: Time spent resolving the generation stage.
+        total_duration_ms: Total background pipeline duration through generation.
+
+    Returns:
+        Materialized completed run retaining all successful stage artifacts.
+
+    Raises:
+        InvalidRunStateError: If the run is not actively generating.
+        GenerationArtifactMismatchError: If retrieval belongs to another run.
+        InvalidGenerationResultError: If generated values are malformed.
+        sqlite3.IntegrityError: If relational persistence rejects any write.
+    """
+    completed_at = _utc_timestamp()
+
+    # One transaction prevents a partial answer or a falsely completed run.
+    with connect() as connection:
+        run = connection.execute(
+            """
+            SELECT status, current_stage FROM pipeline_run WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+        # Only the active generation stage may create the run's immutable answer.
+        if (
+            run is None
+            or run["status"] != "running"
+            or run["current_stage"] != "generation"
+        ):
+            raise InvalidRunStateError(
+                f"Pipeline run '{run_id}' cannot transition to completed."
+            )
+
+        insert_generation_result(
+            connection,
+            run_id,
+            retrieval_result_id,
+            generation_config,
+            generation_result,
+            generation_duration_ms,
+        )
+        cursor = connection.execute(
+            """
+            UPDATE pipeline_run
+            SET generation_duration_ms = ?, status = 'completed',
+                current_stage = NULL, completed_at = ?, duration_ms = ?,
+                error_code = NULL, error_details_json = NULL
+            WHERE id = ? AND status = 'running' AND current_stage = 'generation'
+            """,
+            (generation_duration_ms, completed_at, total_duration_ms, run_id),
+        )
+
+        # Raising here rolls back both the answer and lifecycle completion.
         if cursor.rowcount != 1:
             raise InvalidRunStateError(
                 f"Pipeline run '{run_id}' cannot transition to completed."
@@ -545,6 +625,8 @@ def get_run(run_id: str) -> dict[str, Any]:
     if row is None:
         raise RunNotFoundError(run_id)
 
+    retrieval_result = get_hydrated_retrieval_result_for_run(run_id)
+    generation_result = get_generation_result_for_run(run_id)
     configuration = json.loads(row["effective_config_json"])
     error_details = (
         json.loads(row["error_details_json"])
@@ -572,6 +654,26 @@ def get_run(run_id: str) -> dict[str, Any]:
         embedding_status = "failed"
     else:
         embedding_status = "pending"
+
+    # A persisted retrieval parent proves the complete ranked result was committed.
+    if retrieval_result is not None:
+        retrieval_status = "completed"
+    elif row["status"] == "running" and row["current_stage"] == "retrieval":
+        retrieval_status = "running"
+    elif row["status"] == "failed" and failed_stage == "retrieval":
+        retrieval_status = "failed"
+    else:
+        retrieval_status = "pending"
+
+    # Generation completes only when its immutable answer is present.
+    if generation_result is not None:
+        generation_status = "completed"
+    elif row["status"] == "running" and row["current_stage"] == "generation":
+        generation_status = "running"
+    elif row["status"] == "failed" and failed_stage == "generation":
+        generation_status = "failed"
+    else:
+        generation_status = "pending"
 
     error: dict[str, Any] | None = None
 
@@ -622,6 +724,61 @@ def get_run(run_id: str) -> dict[str, Any]:
             if row["vector_index_reused"] is not None
             else None,
             "duration_ms": row["embedding_duration_ms"],
+        },
+        "retrieval": {
+            "status": retrieval_status,
+            "result_id": retrieval_result["id"] if retrieval_result else None,
+            "requested_top_k": configuration["retrieval"]["top_k"],
+            "returned_count": retrieval_result["returned_count"]
+            if retrieval_result
+            else None,
+            "distance_metric": retrieval_result["distance_metric"]
+            if retrieval_result
+            else embedding_configuration["distance_metric"],
+            "duration_ms": row["retrieval_duration_ms"],
+            "chunks": retrieval_result["hits"] if retrieval_result else [],
+        },
+        "generation": {
+            "status": generation_status,
+            "result_id": generation_result["id"] if generation_result else None,
+            "retrieval_result_id": generation_result["retrieval_result_id"]
+            if generation_result
+            else None,
+            "provider": generation_result["provider"]
+            if generation_result
+            else configuration["generation"]["provider"],
+            "model": generation_result["model"]
+            if generation_result
+            else configuration["generation"]["model"],
+            "provider_model": generation_result["provider_model"]
+            if generation_result
+            else None,
+            "answer": generation_result["answer"] if generation_result else None,
+            "finish_reason": generation_result["finish_reason"]
+            if generation_result
+            else None,
+            "prompt_template_version": generation_result["prompt_template_version"]
+            if generation_result
+            else None,
+            "provider_policy_version": generation_result["provider_policy_version"]
+            if generation_result
+            else None,
+            "prompt_tokens": generation_result["prompt_tokens"]
+            if generation_result
+            else None,
+            "completion_tokens": generation_result["completion_tokens"]
+            if generation_result
+            else None,
+            "total_tokens": generation_result["total_tokens"]
+            if generation_result
+            else None,
+            "provider_called": generation_result["provider_called"]
+            if generation_result
+            else None,
+            "context_chunks": generation_result["context_chunks"]
+            if generation_result
+            else [],
+            "duration_ms": row["generation_duration_ms"],
         },
         "error": error,
     }

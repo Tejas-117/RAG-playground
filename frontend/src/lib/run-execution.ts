@@ -53,12 +53,6 @@ export type RunExecutionView = {
 /** Future stages stay visible without implying that the backend executed them. */
 const unavailableStages: RunStageView[] = [
   {
-    id: "generation",
-    label: "Generate",
-    description: "Not available yet",
-    status: "unavailable",
-  },
-  {
     id: "evaluation",
     label: "Evaluate",
     description: "Not available yet",
@@ -118,9 +112,9 @@ function describeRetrievalStage(run: RunResponse): string {
     return "Searching the vector index and saving ranked chunks";
   }
 
-  // A completed run now guarantees that retrieval was persisted successfully.
-  if (run.status === "completed") {
-    return "Saved the ranked retrieval result";
+  // A persisted result remains complete while generation runs or fails later.
+  if (run.retrieval.status === "completed") {
+    return `Saved ${run.retrieval.returned_count ?? 0} ranked chunks`;
   }
 
   // Safe failure provenance distinguishes retrieval from upstream failures.
@@ -129,6 +123,33 @@ function describeRetrievalStage(run: RunResponse): string {
   }
 
   return "Waiting for the vector index";
+}
+
+/**
+ * Describes generation using only persisted lifecycle and answer provenance.
+ *
+ * @param run - Validated run containing generation state and safe failure data.
+ * @returns A concise generation-stage description derived from persisted state.
+ */
+function describeGenerationStage(run: RunResponse): string {
+  // Active generation identifies the exact configured provider and model.
+  if (run.generation.status === "running") {
+    return `Requesting an answer from ${run.generation.model}`;
+  }
+
+  // A completed answer may be provider-generated or controlled for empty context.
+  if (run.generation.status === "completed") {
+    return run.generation.provider_called
+      ? "Saved the generated answer"
+      : "Saved an insufficient-context answer";
+  }
+
+  // Safe failure provenance distinguishes generation from retrieval failures.
+  if (run.generation.status === "failed") {
+    return "Generation did not complete";
+  }
+
+  return "Waiting for retrieved context";
 }
 
 /**
@@ -172,16 +193,6 @@ export function createExecutionView(
         }
       : undefined;
 
-  // Retrieval has lifecycle visibility even though result details remain internal.
-  const retrievalStatus: RunStageStatus =
-    run.current_stage === "retrieval"
-      ? "running"
-      : run.status === "completed"
-        ? "completed"
-        : run.status === "failed" && run.error?.stage === "retrieval"
-          ? "failed"
-          : "pending";
-
   return {
     status: run.status,
     corpusName,
@@ -207,7 +218,13 @@ export function createExecutionView(
         id: "retrieval",
         label: "Retrieve",
         description: describeRetrievalStage(run),
-        status: retrievalStatus,
+        status: run.retrieval.status,
+      },
+      {
+        id: "generation",
+        label: "Generate",
+        description: describeGenerationStage(run),
+        status: run.generation.status,
       },
       ...unavailableStages,
     ],
@@ -245,6 +262,12 @@ export function createFailedExecution(
       {
         id: "retrieval",
         label: "Retrieve",
+        description: "Not started",
+        status: "unavailable",
+      },
+      {
+        id: "generation",
+        label: "Generate",
         description: "Not started",
         status: "unavailable",
       },

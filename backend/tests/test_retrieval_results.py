@@ -11,7 +11,7 @@ from backend.db.repositories.retrieval_results import (
     RetrievalArtifactMismatchError,
     save_retrieval_result,
 )
-from backend.db.repositories.runs import complete_run_with_retrieval
+from backend.db.repositories.runs import record_retrieval_result
 from backend.retrieval.models import HydratedVectorSearchHit
 
 
@@ -422,45 +422,45 @@ def test_save_retrieval_result_rolls_back_parent_when_child_insert_fails(
     assert _stored_counts() == (0, 0)
 
 
-def test_complete_run_with_empty_retrieval_result(
+def test_record_empty_retrieval_result_advances_to_generation(
     isolated_database: Path,
 ) -> None:
-    """Verify a valid no-hit retrieval result still completes the pipeline run.
+    """Verify a valid no-hit result advances the run to generation.
 
     Args:
         isolated_database: Initialized isolated application database.
 
     Returns:
-        None. Assertions verify empty-result persistence and terminal lifecycle.
+        None. Assertions verify empty-result persistence and stage lifecycle.
     """
     _insert_artifact_fixtures()
 
-    completed_run = complete_run_with_retrieval(
+    retrieval_result_id = record_retrieval_result(
         "run-1",
         "vector-index-1",
         10,
         "cosine",
         (),
         3,
-        9,
     )
 
-    # No nearest neighbors is a valid result, not a retrieval-stage failure.
-    assert completed_run["status"] == "completed"
-    assert completed_run["current_stage"] is None
-    assert completed_run["duration_ms"] == 9
+    # No nearest neighbors is valid context and still advances to generation.
+    assert retrieval_result_id
     assert _stored_counts() == (1, 0)
 
     with connect() as connection:
         run_row = connection.execute(
             """
-            SELECT retrieval_duration_ms FROM pipeline_run WHERE id = 'run-1'
+            SELECT status, current_stage, retrieval_duration_ms
+            FROM pipeline_run WHERE id = 'run-1'
             """
         ).fetchone()
+    assert run_row["status"] == "running"
+    assert run_row["current_stage"] == "generation"
     assert run_row["retrieval_duration_ms"] == 3
 
 
-def test_complete_run_rolls_back_result_when_ranked_write_fails(
+def test_record_retrieval_rolls_back_result_when_ranked_write_fails(
     isolated_database: Path,
 ) -> None:
     """Verify retrieval rows and terminal transition share one transaction.
@@ -486,14 +486,13 @@ def test_complete_run_rolls_back_result_when_ranked_write_fails(
         )
 
     with pytest.raises(sqlite3.IntegrityError, match="simulated pipeline"):
-        complete_run_with_retrieval(
+        record_retrieval_result(
             "run-1",
             "vector-index-1",
             10,
             "cosine",
             (_hit(1, "chunk-1", 0.1),),
             3,
-            9,
         )
 
     # The transaction restores both the stage and the empty result tables.

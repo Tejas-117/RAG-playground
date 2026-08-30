@@ -64,11 +64,70 @@ const runEmbeddingResponseSchema = z.object({
   duration_ms: z.number().int().nonnegative().nullable(),
 });
 
+/** Runtime contract for one ranked retrieved chunk and its source provenance. */
+const runRetrievedChunkResponseSchema = z.object({
+  rank: z.number().int().positive(),
+  chunk_id: z.string().min(1),
+  raw_distance: z.number(),
+  source_document_id: z.string().min(1),
+  original_filename: z.string().min(1),
+  ordinal: z.number().int().nonnegative(),
+  text: z.string(),
+  character_start_offset: z.number().int().nonnegative().nullable(),
+  character_end_offset: z.number().int().nonnegative().nullable(),
+  token_start_offset: z.number().int().nonnegative().nullable(),
+  token_end_offset: z.number().int().nonnegative().nullable(),
+  page_start: z.number().int().positive().nullable(),
+  page_end: z.number().int().positive().nullable(),
+  section_path: z.array(z.string()).nullable(),
+  source_metadata: z.record(z.string(), z.unknown()),
+});
+
+/** Runtime contract for retrieval lifecycle and its persisted ranked result. */
+const runRetrievalResponseSchema = z.object({
+  status: runStageStatusSchema,
+  result_id: z.string().min(1).nullable(),
+  requested_top_k: z.number().int().positive(),
+  returned_count: z.number().int().nonnegative().nullable(),
+  distance_metric: z.enum(["cosine", "dot_product", "euclidean"]),
+  duration_ms: z.number().int().nonnegative().nullable(),
+  chunks: z.array(runRetrievedChunkResponseSchema),
+});
+
+/** Runtime contract for one retrieval rank included in the generation prompt. */
+const runGenerationContextResponseSchema = z.object({
+  ordinal: z.number().int().positive(),
+  retrieval_rank: z.number().int().positive(),
+  chunk_id: z.string().min(1),
+});
+
+/** Runtime contract for generation lifecycle, answer, usage, and provenance. */
+const runGenerationResponseSchema = z.object({
+  status: runStageStatusSchema,
+  result_id: z.string().min(1).nullable(),
+  retrieval_result_id: z.string().min(1).nullable(),
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  provider_model: z.string().min(1).nullable(),
+  answer: z.string().min(1).nullable(),
+  finish_reason: z.string().min(1).nullable(),
+  prompt_template_version: z.string().min(1).nullable(),
+  provider_policy_version: z.string().min(1).nullable(),
+  prompt_tokens: z.number().int().nonnegative().nullable(),
+  completion_tokens: z.number().int().nonnegative().nullable(),
+  total_tokens: z.number().int().nonnegative().nullable(),
+  provider_called: z.boolean().nullable(),
+  context_chunks: z.array(runGenerationContextResponseSchema),
+  duration_ms: z.number().int().nonnegative().nullable(),
+});
+
 /** Runtime contract for a persisted execution failure returned while polling. */
 const runFailureSchema = z.object({
   code: z.string().min(1),
   message: z.string().min(1),
-  stage: z.enum(["chunking", "embedding", "retrieval"]).nullable(),
+  stage: z
+    .enum(["chunking", "embedding", "retrieval", "generation"])
+    .nullable(),
   details: z.record(z.string(), z.unknown()),
 });
 
@@ -76,13 +135,17 @@ const runFailureSchema = z.object({
 const runResponseSchema = runCreateRequestSchema.extend({
   id: z.string().min(1),
   status: z.enum(["pending", "running", "completed", "failed"]),
-  current_stage: z.enum(["chunking", "embedding", "retrieval"]).nullable(),
+  current_stage: z
+    .enum(["chunking", "embedding", "retrieval", "generation"])
+    .nullable(),
   created_at: z.string().min(1),
   started_at: z.string().min(1).nullable(),
   completed_at: z.string().min(1).nullable(),
   duration_ms: z.number().int().nonnegative().nullable(),
   chunking: runChunkingResponseSchema,
   embedding: runEmbeddingResponseSchema,
+  retrieval: runRetrievalResponseSchema,
+  generation: runGenerationResponseSchema,
   error: runFailureSchema.nullable(),
 });
 

@@ -15,7 +15,7 @@ POST /runs
   -> validate and store explicit vectors in Chroma
   -> persist ready vector_index metadata in SQLite
   -> attach vector_index and advance pipeline_run to retrieval
-  -> retrieve ranked chunks before completing pipeline_run
+  -> retrieve ranked chunks and generate an answer before completion
 
 GET /runs/{run_id}
   -> return current stage, artifact summaries, timings, or safe failure

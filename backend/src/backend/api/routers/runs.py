@@ -90,6 +90,120 @@ class RunEmbeddingResponse(BaseModel):
     duration_ms: int | None = Field(default=None, ge=0)
 
 
+class RunRetrievedChunkResponse(BaseModel):
+    """Expose one ranked retrieved chunk with source and score provenance.
+
+    Attributes:
+        rank: One-based nearest-neighbor position.
+        chunk_id: Stable application chunk identifier.
+        raw_distance: Unmodified vector-store distance.
+        source_document_id: Stable source document identifier.
+        original_filename: User-visible source filename.
+        ordinal: Zero-based position within the source document's chunk set.
+        text: Exact persisted chunk text supplied as possible generation context.
+        character_start_offset: Inclusive canonical-text character offset.
+        character_end_offset: Exclusive canonical-text character offset.
+        token_start_offset: Inclusive canonical-text token offset when exact.
+        token_end_offset: Exclusive canonical-text token offset when exact.
+        page_start: First intersected physical page when available.
+        page_end: Last intersected physical page when available.
+        section_path: Optional logical heading hierarchy.
+        source_metadata: Parser and source-block provenance.
+    """
+
+    rank: int = Field(gt=0)
+    chunk_id: str = Field(min_length=1)
+    raw_distance: float
+    source_document_id: str = Field(min_length=1)
+    original_filename: str = Field(min_length=1)
+    ordinal: int = Field(ge=0)
+    text: str
+    character_start_offset: int | None = Field(default=None, ge=0)
+    character_end_offset: int | None = Field(default=None, ge=0)
+    token_start_offset: int | None = Field(default=None, ge=0)
+    token_end_offset: int | None = Field(default=None, ge=0)
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
+    section_path: list[str] | None = None
+    source_metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class RunRetrievalResponse(BaseModel):
+    """Describe retrieval state and its immutable ranked result when available.
+
+    Attributes:
+        status: Current lifecycle state of retrieval.
+        result_id: Persisted retrieval-result identifier after success.
+        requested_top_k: Configured maximum number of returned chunks.
+        returned_count: Actual number of persisted ranked chunks.
+        distance_metric: Raw-distance semantics of every returned score.
+        duration_ms: Retrieval-stage wall-clock duration.
+        chunks: Ranked hydrated result chunks after retrieval succeeds.
+    """
+
+    status: StageStatus
+    result_id: str | None = None
+    requested_top_k: int = Field(gt=0)
+    returned_count: int | None = Field(default=None, ge=0)
+    distance_metric: Literal["cosine", "dot_product", "euclidean"]
+    duration_ms: int | None = Field(default=None, ge=0)
+    chunks: list[RunRetrievedChunkResponse] = Field(default_factory=list)
+
+
+class RunGenerationContextResponse(BaseModel):
+    """Identify one retrieval rank included in the generated-answer prompt.
+
+    Attributes:
+        ordinal: One-based position within the prompt context.
+        retrieval_rank: Original one-based retrieval-result rank.
+        chunk_id: Stable chunk identifier included in the prompt.
+    """
+
+    ordinal: int = Field(gt=0)
+    retrieval_rank: int = Field(gt=0)
+    chunk_id: str = Field(min_length=1)
+
+
+class RunGenerationResponse(BaseModel):
+    """Describe generation state, answer, usage, and prompt provenance.
+
+    Attributes:
+        status: Current lifecycle state of generation.
+        result_id: Persisted generation-result identifier after success.
+        retrieval_result_id: Exact retrieval output used to construct the prompt.
+        provider: Backend-registered generation provider identifier.
+        model: Requested provider model identifier.
+        provider_model: Provider-reported model identifier when available.
+        answer: Generated answer text after success.
+        finish_reason: Provider reason for ending the completion.
+        prompt_template_version: Versioned backend prompt policy.
+        provider_policy_version: Versioned provider-request policy.
+        prompt_tokens: Provider-reported input token count.
+        completion_tokens: Provider-reported output token count.
+        total_tokens: Provider-reported combined token count.
+        provider_called: Whether generation required a remote API call.
+        context_chunks: Exact retrieval ranks included in the prompt.
+        duration_ms: Generation-stage wall-clock duration.
+    """
+
+    status: StageStatus
+    result_id: str | None = None
+    retrieval_result_id: str | None = None
+    provider: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    provider_model: str | None = None
+    answer: str | None = None
+    finish_reason: str | None = None
+    prompt_template_version: str | None = None
+    provider_policy_version: str | None = None
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    provider_called: bool | None = None
+    context_chunks: list[RunGenerationContextResponse] = Field(default_factory=list)
+    duration_ms: int | None = Field(default=None, ge=0)
+
+
 class RunErrorResponse(BaseModel):
     """Expose a safe terminal pipeline failure to polling clients.
 
@@ -102,7 +216,7 @@ class RunErrorResponse(BaseModel):
 
     code: str
     message: str
-    stage: Literal["chunking", "embedding", "retrieval"] | None = None
+    stage: Literal["chunking", "embedding", "retrieval", "generation"] | None = None
     details: dict[str, object] = Field(default_factory=dict)
 
 
@@ -122,6 +236,8 @@ class RunResponse(BaseModel):
         duration_ms: Total execution duration for a terminal run.
         chunking: Current chunking state and optional artifact summary.
         embedding: Current embedding state and optional artifact summary.
+        retrieval: Current retrieval state and ranked result when available.
+        generation: Current generation state and answer when available.
         error: Safe structured failure for a failed run.
     """
 
@@ -130,13 +246,23 @@ class RunResponse(BaseModel):
     question: str
     configuration: PipelineConfig
     status: RunStatus
-    current_stage: Literal["chunking", "embedding", "retrieval"] | None = None
+    current_stage: (
+        Literal[
+            "chunking",
+            "embedding",
+            "retrieval",
+            "generation",
+        ]
+        | None
+    ) = None
     created_at: str
     started_at: str | None = None
     completed_at: str | None = None
     duration_ms: int | None = Field(default=None, ge=0)
     chunking: RunChunkingResponse
     embedding: RunEmbeddingResponse
+    retrieval: RunRetrievalResponse
+    generation: RunGenerationResponse
     error: RunErrorResponse | None = None
 
 

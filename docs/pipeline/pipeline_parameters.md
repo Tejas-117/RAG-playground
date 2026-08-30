@@ -179,8 +179,8 @@ Reranking introduces another model, latency, cost, and score semantics, so it sh
 
 ### MVP Parameters
 
-- **LLM provider**.
-- **LLM model**.
+- **LLM provider**: Groq.
+- **LLM model**: GPT-OSS 20B (default), GPT-OSS 120B, or Llama 3.2 3B Preview.
 - **Temperature**.
 - **Maximum output tokens**: optional.
 
@@ -191,7 +191,7 @@ Temperature: 0.2
 Maximum output tokens: backend-defined safe default
 ```
 
-The prompt template is backend-controlled and versioned. The UI may show its name/version but should not offer a free-form prompt editor initially.
+The prompt template is backend-controlled and versioned. The UI may show its name/version but should not offer a free-form prompt editor initially. Groq is called through a provider-neutral adapter with a server-side `GROQ_API_KEY`; keys are never part of experiment configuration.
 
 ### Reserved for Later Versions
 

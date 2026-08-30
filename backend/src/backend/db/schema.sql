@@ -197,13 +197,14 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
     ),
     current_stage TEXT CHECK (
         current_stage IS NULL OR
-        current_stage IN ('chunking', 'embedding', 'retrieval')
+        current_stage IN ('chunking', 'embedding', 'retrieval', 'generation')
     ),
     chunk_set_reused INTEGER CHECK (chunk_set_reused IN (0, 1)),
     vector_index_reused INTEGER CHECK (vector_index_reused IN (0, 1)),
     chunking_duration_ms INTEGER CHECK (chunking_duration_ms >= 0),
     embedding_duration_ms INTEGER CHECK (embedding_duration_ms >= 0),
     retrieval_duration_ms INTEGER CHECK (retrieval_duration_ms >= 0),
+    generation_duration_ms INTEGER CHECK (generation_duration_ms >= 0),
     created_at TEXT NOT NULL,
     started_at TEXT,
     completed_at TEXT,
@@ -230,6 +231,7 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
             AND chunking_duration_ms IS NOT NULL
             AND embedding_duration_ms IS NOT NULL
             AND retrieval_duration_ms IS NOT NULL
+            AND generation_duration_ms IS NOT NULL
             AND current_stage IS NULL
             AND started_at IS NOT NULL
             AND completed_at IS NOT NULL
@@ -294,3 +296,51 @@ CREATE TABLE IF NOT EXISTS retrieved_chunk (
 
 CREATE INDEX IF NOT EXISTS idx_retrieved_chunk_chunk_id
     ON retrieved_chunk (chunk_id);
+
+-- One immutable answer generated from one persisted retrieval result. The full
+-- prompt is reconstructable from its version, run question, and context links.
+CREATE TABLE IF NOT EXISTS generation_result (
+    id TEXT PRIMARY KEY,
+    pipeline_run_id TEXT NOT NULL UNIQUE
+        REFERENCES pipeline_run(id) ON DELETE CASCADE,
+    retrieval_result_id TEXT NOT NULL UNIQUE
+        REFERENCES retrieval_result(id) ON DELETE RESTRICT,
+    provider TEXT NOT NULL CHECK (length(trim(provider)) > 0),
+    model TEXT NOT NULL CHECK (length(trim(model)) > 0),
+    provider_model TEXT,
+    prompt_template_version TEXT NOT NULL
+        CHECK (length(trim(prompt_template_version)) > 0),
+    provider_policy_version TEXT NOT NULL
+        CHECK (length(trim(provider_policy_version)) > 0),
+    generation_config_json TEXT NOT NULL CHECK (
+        json_valid(generation_config_json)
+        AND json_type(generation_config_json) = 'object'
+    ),
+    answer_text TEXT NOT NULL CHECK (length(trim(answer_text)) > 0),
+    finish_reason TEXT NOT NULL CHECK (length(trim(finish_reason)) > 0),
+    prompt_tokens INTEGER CHECK (prompt_tokens >= 0),
+    completion_tokens INTEGER CHECK (completion_tokens >= 0),
+    total_tokens INTEGER CHECK (total_tokens >= 0),
+    provider_request_id TEXT,
+    system_fingerprint TEXT,
+    provider_called INTEGER NOT NULL CHECK (provider_called IN (0, 1)),
+    duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_generation_result_retrieval_result_id
+    ON generation_result (retrieval_result_id);
+
+-- Exact retrieval ranks included in the generation prompt. Lower-ranked
+-- retrieval hits may be omitted when the context budget is exhausted.
+CREATE TABLE IF NOT EXISTS generation_context_chunk (
+    generation_result_id TEXT NOT NULL
+        REFERENCES generation_result(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+    retrieval_result_id TEXT NOT NULL,
+    retrieval_rank INTEGER NOT NULL CHECK (retrieval_rank > 0),
+    PRIMARY KEY (generation_result_id, ordinal),
+    UNIQUE (generation_result_id, retrieval_rank),
+    FOREIGN KEY (retrieval_result_id, retrieval_rank)
+        REFERENCES retrieved_chunk(retrieval_result_id, rank) ON DELETE RESTRICT
+);

@@ -599,7 +599,7 @@ export default function ExperimentWorkbench() {
       // Terminal state determines the notice; provider failures stay attached to the run.
       if (persistedRun.status === "completed") {
         setRunNotice({
-          message: `Run ${persistedRun.id} completed retrieval.`,
+          message: `Run ${persistedRun.id} generated an answer.`,
           type: "success",
         });
       } else {

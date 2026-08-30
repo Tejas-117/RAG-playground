@@ -7,6 +7,8 @@ from backend.embedding.vector_store import get_vector_store
 
 # Delete dependent records before the immutable corpus and document roots.
 DATABASE_DELETE_ORDER = (
+    "generation_context_chunk",
+    "generation_result",
     "retrieved_chunk",
     "retrieval_result",
     "pipeline_run",

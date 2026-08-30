@@ -43,6 +43,8 @@ def test_schema_creates_corpus_and_document_tables() -> None:
         "chunk",
         "retrieval_result",
         "retrieved_chunk",
+        "generation_result",
+        "generation_context_chunk",
         "pipeline_run",
     }.issubset(table_names)
     assert not {"corpus_version", "corpus_version_document"}.intersection(table_names)
@@ -415,11 +417,11 @@ def test_schema_records_single_question_pipeline_runs() -> None:
             id, corpus_id, chunk_set_id, vector_index_id, question,
             effective_config_json, status, current_stage, chunk_set_reused,
             vector_index_reused, chunking_duration_ms, embedding_duration_ms,
-            retrieval_duration_ms, created_at, started_at, completed_at,
-            duration_ms, error_code,
+            retrieval_duration_ms, generation_duration_ms,
+            created_at, started_at, completed_at, duration_ms, error_code,
             error_details_json
         ) VALUES (
-            ?, ?, ?, ?, ?, ?, 'completed', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, 'completed', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             NULL, NULL
         )
         """,
@@ -432,6 +434,7 @@ def test_schema_records_single_question_pipeline_runs() -> None:
             '{"retrieval":{"top_k":10}}',
             0,
             0,
+            1,
             1,
             1,
             1,

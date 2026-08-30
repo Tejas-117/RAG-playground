@@ -1,5 +1,6 @@
 """SQLite boundaries for immutable ranked retrieval results."""
 
+import json
 import math
 import sqlite3
 from datetime import datetime, timezone
@@ -189,6 +190,79 @@ def get_retrieval_result(retrieval_result_id: str) -> dict[str, Any]:
         "duration_ms": result_row["duration_ms"],
         "created_at": result_row["created_at"],
         "hits": [dict(row) for row in hit_rows],
+    }
+
+
+def get_hydrated_retrieval_result_for_run(
+    pipeline_run_id: str,
+) -> dict[str, Any] | None:
+    """Load one run's retrieval result with ranked text and source provenance.
+
+    Args:
+        pipeline_run_id: Stable run whose persisted retrieval output should be loaded.
+
+    Returns:
+        Hydrated retrieval result, or ``None`` before retrieval is persisted.
+    """
+    # Read the immutable parent and all source-owned chunk fields consistently.
+    with connect() as connection:
+        result_row = connection.execute(
+            "SELECT * FROM retrieval_result WHERE pipeline_run_id = ?",
+            (pipeline_run_id,),
+        ).fetchone()
+
+        # Absence is normal while retrieval is pending, running, or failed.
+        if result_row is None:
+            return None
+
+        hit_rows = connection.execute(
+            """
+            SELECT retrieved_chunk.rank,
+                   retrieved_chunk.chunk_id,
+                   retrieved_chunk.raw_distance,
+                   chunk.source_document_id,
+                   document.original_filename,
+                   chunk.ordinal,
+                   chunk.text,
+                   chunk.character_start_offset,
+                   chunk.character_end_offset,
+                   chunk.token_start_offset,
+                   chunk.token_end_offset,
+                   chunk.page_start,
+                   chunk.page_end,
+                   chunk.section_path_json,
+                   chunk.source_metadata_json
+            FROM retrieved_chunk
+            JOIN chunk ON chunk.id = retrieved_chunk.chunk_id
+            JOIN document ON document.id = chunk.source_document_id
+            WHERE retrieved_chunk.retrieval_result_id = ?
+            ORDER BY retrieved_chunk.rank
+            """,
+            (result_row["id"],),
+        ).fetchall()
+
+    hits: list[dict[str, Any]] = []
+
+    # Decode normalized JSON provenance while retaining exact ranking and text.
+    for hit_row in hit_rows:
+        hit = dict(hit_row)
+        section_path_json = hit.pop("section_path_json")
+        source_metadata_json = hit.pop("source_metadata_json")
+        hit["section_path"] = (
+            json.loads(section_path_json) if section_path_json is not None else None
+        )
+        hit["source_metadata"] = json.loads(source_metadata_json)
+        hits.append(hit)
+
+    return {
+        "id": result_row["id"],
+        "vector_index_id": result_row["vector_index_id"],
+        "requested_top_k": result_row["requested_top_k"],
+        "returned_count": result_row["returned_count"],
+        "distance_metric": result_row["distance_metric"],
+        "duration_ms": result_row["duration_ms"],
+        "created_at": result_row["created_at"],
+        "hits": hits,
     }
 
 
