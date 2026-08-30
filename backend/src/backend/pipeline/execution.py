@@ -6,15 +6,21 @@ from collections.abc import Callable
 from time import perf_counter
 from typing import Any
 
+from backend.db.repositories.retrieval_results import (
+    InvalidRetrievalResultError,
+    RetrievalArtifactMismatchError,
+)
 from backend.db.repositories.runs import (
     ChunkSetNotReadyError,
     InvalidRunStateError,
     RunNotFoundError,
+    VectorIndexArtifactMismatchError,
     VectorIndexNotReadyError,
-    complete_run,
+    complete_run_with_retrieval,
     fail_run,
     get_run_execution_input,
     record_chunking_result,
+    record_embedding_result,
 )
 from backend.embedding.models import (
     EmbeddingAuthenticationError,
@@ -43,7 +49,17 @@ from backend.ingestion.chunk_sets import (
 )
 from backend.ingestion.chunkers.models import ChunkingTokenizer
 from backend.ingestion.chunkers.tokenizer import TokenizerAssetError
-from backend.pipeline.configs import ChunkingConfig, EmbeddingConfig
+from backend.pipeline.configs import ChunkingConfig, EmbeddingConfig, RetrievalConfig
+from backend.retrieval.chunk_hydration import ChunkHydrationError
+from backend.retrieval.models import HydratedVectorSearchHit
+from backend.retrieval.service import (
+    InvalidRetrievalArtifactError,
+    retrieve_chunks,
+)
+from backend.retrieval.vector_search import (
+    IncompatibleVectorIndexError,
+    InvalidVectorSearchRequestError,
+)
 
 # Use the module name to identify overall pipeline lifecycle records.
 logger = logging.getLogger(__name__)
@@ -63,6 +79,19 @@ VectorIndexBuilder = Callable[
         VectorStore | None,
     ],
     VectorIndexBuildResult,
+]
+
+# A retriever embeds one question, searches one exact index, and hydrates its hits.
+ChunkRetriever = Callable[
+    [
+        str,
+        RetrievalConfig,
+        EmbeddingConfig,
+        dict[str, Any],
+        EmbeddingProvider | None,
+        VectorStore | None,
+    ],
+    tuple[HydratedVectorSearchHit, ...],
 ]
 
 
@@ -99,12 +128,13 @@ class PipelineRunExecutionError(RuntimeError):
 
 
 class PipelineExecutor:
-    """Execute claimed runs through chunking and embedding in pipeline order."""
+    """Execute claimed runs through chunking, embedding, and retrieval."""
 
     def __init__(
         self,
         chunk_set_builder: ChunkSetBuilder = build_or_reuse_chunk_set,
         vector_index_builder: VectorIndexBuilder = build_or_reuse_vector_index,
+        chunk_retriever: ChunkRetriever = retrieve_chunks,
         tokenizer: ChunkingTokenizer | None = None,
         embedding_provider: EmbeddingProvider | None = None,
         vector_store: VectorStore | None = None,
@@ -114,6 +144,7 @@ class PipelineExecutor:
         Args:
             chunk_set_builder: Service that builds or reuses one chunk set.
             vector_index_builder: Service that builds or reuses one vector index.
+            chunk_retriever: Service that searches and hydrates ranked chunks.
             tokenizer: Optional chunking tokenizer override for deterministic tests.
             embedding_provider: Optional embedding adapter override for tests.
             vector_store: Optional vector-store adapter override for tests.
@@ -123,6 +154,7 @@ class PipelineExecutor:
         """
         self._chunk_set_builder = chunk_set_builder
         self._vector_index_builder = vector_index_builder
+        self._chunk_retriever = chunk_retriever
         self._tokenizer = tokenizer
         self._embedding_provider = embedding_provider
         self._vector_store = vector_store
@@ -134,7 +166,7 @@ class PipelineExecutor:
             run_id: Stable identifier of a running persisted pipeline job.
 
         Returns:
-            Completed run linked to ready chunk and vector-index artifacts.
+            Completed run linked to ready artifacts and its retrieval result.
 
         Raises:
             PipelineRunExecutionError: If a stage or lifecycle operation fails.
@@ -181,23 +213,62 @@ class PipelineExecutor:
                 self._vector_store,
             )
             embedding_duration_ms = _elapsed_milliseconds(embedding_started_counter)
-            total_duration_ms = _elapsed_milliseconds(run_started_counter)
-            completed_run = complete_run(
+            record_embedding_result(
                 run_id,
                 embedding_result.artifact["id"],
                 embedding_result.reused,
                 embedding_duration_ms,
+            )
+            logger.info(
+                "pipeline_run_stage_completed run_id=%s corpus_id=%s "
+                "stage=embedding artifact_id=%s reused=%s duration_ms=%d",
+                run_id,
+                corpus_id,
+                embedding_result.artifact["id"],
+                embedding_result.reused,
+                embedding_duration_ms,
+            )
+
+            # Retrieve and hydrate query-specific chunks from the attached exact index.
+            current_stage = "retrieval"
+            retrieval_started_counter = perf_counter()
+            retrieval_hits = self._chunk_retriever(
+                execution_input["question"],
+                configuration.retrieval,
+                configuration.embedding,
+                embedding_result.artifact,
+                self._embedding_provider,
+                self._vector_store,
+            )
+            retrieval_duration_ms = _elapsed_milliseconds(retrieval_started_counter)
+            total_duration_ms = _elapsed_milliseconds(run_started_counter)
+            completed_run = complete_run_with_retrieval(
+                run_id,
+                embedding_result.artifact["id"],
+                configuration.retrieval.top_k,
+                configuration.embedding.distance_metric,
+                retrieval_hits,
+                retrieval_duration_ms,
                 total_duration_ms,
             )
             logger.info(
+                "pipeline_run_stage_completed run_id=%s corpus_id=%s "
+                "stage=retrieval vector_index_id=%s hit_count=%d "
+                "distance_metric=%s duration_ms=%d",
+                run_id,
+                corpus_id,
+                embedding_result.artifact["id"],
+                len(retrieval_hits),
+                configuration.embedding.distance_metric.value,
+                retrieval_duration_ms,
+            )
+            logger.info(
                 "pipeline_run_completed run_id=%s corpus_id=%s "
-                "chunk_set_id=%s vector_index_id=%s "
-                "vector_index_reused=%s duration_ms=%d",
+                "chunk_set_id=%s vector_index_id=%s duration_ms=%d",
                 run_id,
                 corpus_id,
                 chunking_result.artifact["id"],
                 embedding_result.artifact["id"],
-                embedding_result.reused,
                 total_duration_ms,
             )
             return completed_run
@@ -276,7 +347,11 @@ def _map_execution_error(
     if stage == "chunking":
         return _map_chunking_error(run_id, error)
 
-    return _map_embedding_error(run_id, error)
+    # Embedding and retrieval reuse adapters but need stage-specific public errors.
+    if stage == "embedding":
+        return _map_embedding_error(run_id, error)
+
+    return _map_retrieval_error(run_id, error)
 
 
 def _map_chunking_error(
@@ -441,6 +516,7 @@ def _map_embedding_error(
         (
             sqlite3.Error,
             InvalidRunStateError,
+            VectorIndexArtifactMismatchError,
             VectorIndexNotReadyError,
             RunNotFoundError,
         ),
@@ -466,6 +542,142 @@ def _map_embedding_error(
         "embedding",
         "embedding_failed",
         "The selected chunks could not be embedded.",
+    )
+
+
+def _map_retrieval_error(
+    run_id: str,
+    error: Exception,
+) -> PipelineRunExecutionError:
+    """Translate query embedding, search, hydration, or persistence failures.
+
+    Args:
+        run_id: Stable identifier of the failed run.
+        error: Exception raised while resolving and saving retrieved chunks.
+
+    Returns:
+        Safe retrieval-stage execution error.
+    """
+    # Keep common remote query-embedding failures distinguishable for retry UX.
+    provider_errors: tuple[tuple[type[Exception], str, str], ...] = (
+        (
+            EmbeddingProviderUnavailableError,
+            "retrieval_provider_unavailable",
+            "The embedding provider could not embed the retrieval question.",
+        ),
+        (
+            EmbeddingRequestTimeoutError,
+            "retrieval_request_timeout",
+            "The retrieval embedding request timed out.",
+        ),
+        (
+            EmbeddingAuthenticationError,
+            "retrieval_authentication_failed",
+            "The embedding provider rejected backend authentication.",
+        ),
+        (
+            EmbeddingRateLimitError,
+            "retrieval_rate_limited",
+            "The embedding provider rate limit was reached during retrieval.",
+        ),
+        (
+            EmbeddingInputTooLargeError,
+            "retrieval_query_too_large",
+            "The question exceeds the embedding model's input limit.",
+        ),
+        (
+            EmbeddingRequestRejectedError,
+            "retrieval_request_rejected",
+            "The embedding provider rejected the retrieval request.",
+        ),
+        (
+            InvalidEmbeddingResponseError,
+            "invalid_retrieval_embedding_response",
+            "The embedding provider returned an invalid query vector.",
+        ),
+    )
+
+    # Return the first matching specific query-provider category.
+    for error_type, code, message in provider_errors:
+        if isinstance(error, error_type):
+            return PipelineRunExecutionError(
+                run_id,
+                "retrieval",
+                code,
+                message,
+            )
+
+    # Invalid requests should be impossible after API validation but remain explicit.
+    if isinstance(error, InvalidVectorSearchRequestError):
+        return PipelineRunExecutionError(
+            run_id,
+            "retrieval",
+            "invalid_retrieval_request",
+            "The saved question or retrieval limit is invalid.",
+        )
+
+    # Compatibility failures prevent querying a stale or unrelated index space.
+    if isinstance(
+        error,
+        (InvalidRetrievalArtifactError, IncompatibleVectorIndexError),
+    ):
+        return PipelineRunExecutionError(
+            run_id,
+            "retrieval",
+            "incompatible_vector_index",
+            "The vector index is incompatible with this retrieval request.",
+        )
+
+    # Hydration must resolve every vector hit back to exact application-owned chunks.
+    if isinstance(error, ChunkHydrationError):
+        return PipelineRunExecutionError(
+            run_id,
+            "retrieval",
+            "retrieval_chunk_hydration_failed",
+            "The retrieved chunks could not be loaded safely.",
+        )
+
+    # Chroma query failures remain distinct from query-embedding failures.
+    if isinstance(error, VectorStoreError):
+        return PipelineRunExecutionError(
+            run_id,
+            "retrieval",
+            "retrieval_vector_store_unavailable",
+            "The vector index could not be searched.",
+        )
+
+    # Relational failures must not leak constraints or internal artifact identifiers.
+    if isinstance(
+        error,
+        (
+            sqlite3.Error,
+            InvalidRunStateError,
+            InvalidRetrievalResultError,
+            RetrievalArtifactMismatchError,
+            RunNotFoundError,
+        ),
+    ):
+        return PipelineRunExecutionError(
+            run_id,
+            "retrieval",
+            "retrieval_persistence_failed",
+            "The retrieval result could not be saved.",
+        )
+
+    # Hide all other provider and implementation details from persisted errors.
+    if isinstance(error, EmbeddingProviderError):
+        return PipelineRunExecutionError(
+            run_id,
+            "retrieval",
+            "retrieval_embedding_failed",
+            "The retrieval question could not be embedded.",
+        )
+
+    return PipelineRunExecutionError(
+        run_id,
+        "retrieval",
+        "retrieval_failed",
+        "The retrieval stage could not be completed.",
     )
 
 

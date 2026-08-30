@@ -53,12 +53,6 @@ export type RunExecutionView = {
 /** Future stages stay visible without implying that the backend executed them. */
 const unavailableStages: RunStageView[] = [
   {
-    id: "retrieval",
-    label: "Retrieve",
-    description: "Not available yet",
-    status: "unavailable",
-  },
-  {
     id: "generation",
     label: "Generate",
     description: "Not available yet",
@@ -113,6 +107,31 @@ function describeStage(
 }
 
 /**
+ * Describes retrieval using the persisted run lifecycle without exposing hits.
+ *
+ * @param run - Validated run containing the active stage and safe failure data.
+ * @returns A concise retrieval-stage description derived from persisted state.
+ */
+function describeRetrievalStage(run: RunResponse): string {
+  // The backend exposes retrieval directly while the vector index is searched.
+  if (run.current_stage === "retrieval") {
+    return "Searching the vector index and saving ranked chunks";
+  }
+
+  // A completed run now guarantees that retrieval was persisted successfully.
+  if (run.status === "completed") {
+    return "Saved the ranked retrieval result";
+  }
+
+  // Safe failure provenance distinguishes retrieval from upstream failures.
+  if (run.status === "failed" && run.error?.stage === "retrieval") {
+    return "Retrieval did not complete";
+  }
+
+  return "Waiting for the vector index";
+}
+
+/**
  * Maps any persisted backend run state into the stable UI presentation model.
  *
  * @param run - Validated run returned by enqueueing or polling.
@@ -153,6 +172,16 @@ export function createExecutionView(
         }
       : undefined;
 
+  // Retrieval has lifecycle visibility even though result details remain internal.
+  const retrievalStatus: RunStageStatus =
+    run.current_stage === "retrieval"
+      ? "running"
+      : run.status === "completed"
+        ? "completed"
+        : run.status === "failed" && run.error?.stage === "retrieval"
+          ? "failed"
+          : "pending";
+
   return {
     status: run.status,
     corpusName,
@@ -173,6 +202,12 @@ export function createExecutionView(
         label: "Embed",
         description: describeStage(run, "embedding"),
         status: run.embedding.status,
+      },
+      {
+        id: "retrieval",
+        label: "Retrieve",
+        description: describeRetrievalStage(run),
+        status: retrievalStatus,
       },
       ...unavailableStages,
     ],
@@ -204,6 +239,12 @@ export function createFailedExecution(
       {
         id: "embedding",
         label: "Embed",
+        description: "Not started",
+        status: "unavailable",
+      },
+      {
+        id: "retrieval",
+        label: "Retrieve",
         description: "Not started",
         status: "unavailable",
       },

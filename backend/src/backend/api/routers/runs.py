@@ -102,7 +102,7 @@ class RunErrorResponse(BaseModel):
 
     code: str
     message: str
-    stage: Literal["chunking", "embedding"] | None = None
+    stage: Literal["chunking", "embedding", "retrieval"] | None = None
     details: dict[str, object] = Field(default_factory=dict)
 
 
@@ -130,7 +130,7 @@ class RunResponse(BaseModel):
     question: str
     configuration: PipelineConfig
     status: RunStatus
-    current_stage: Literal["chunking", "embedding"] | None = None
+    current_stage: Literal["chunking", "embedding", "retrieval"] | None = None
     created_at: str
     started_at: str | None = None
     completed_at: str | None = None

@@ -72,8 +72,8 @@ rules.
 `PipelineExecutor` owns stage ordering and the overall run lifecycle. It does
 not implement tokenization or chunk boundaries; those remain in the chunking
 service and strategy classes. It passes the ready artifact to the implemented
-embedding/index service. Retrieval, generation, and evaluation remain future
-stages.
+embedding/index service, followed by retrieval. Generation and evaluation
+remain future stages.
 
 Chunking runs in a local background worker because tokenization and SQLite work
 are synchronous. `POST /runs` returns the persisted pending run immediately.

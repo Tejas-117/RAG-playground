@@ -599,7 +599,7 @@ export default function ExperimentWorkbench() {
       // Terminal state determines the notice; provider failures stay attached to the run.
       if (persistedRun.status === "completed") {
         setRunNotice({
-          message: `Run ${persistedRun.id} completed chunking and embedding.`,
+          message: `Run ${persistedRun.id} completed retrieval.`,
           type: "success",
         });
       } else {

@@ -415,10 +415,12 @@ def test_schema_records_single_question_pipeline_runs() -> None:
             id, corpus_id, chunk_set_id, vector_index_id, question,
             effective_config_json, status, current_stage, chunk_set_reused,
             vector_index_reused, chunking_duration_ms, embedding_duration_ms,
-            created_at, started_at, completed_at, duration_ms, error_code,
+            retrieval_duration_ms, created_at, started_at, completed_at,
+            duration_ms, error_code,
             error_details_json
         ) VALUES (
-            ?, ?, ?, ?, ?, ?, 'completed', NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL
+            ?, ?, ?, ?, ?, ?, 'completed', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            NULL, NULL
         )
         """,
         (
@@ -430,6 +432,7 @@ def test_schema_records_single_question_pipeline_runs() -> None:
             '{"retrieval":{"top_k":10}}',
             0,
             0,
+            1,
             1,
             1,
             "2026-08-02T00:00:01Z",

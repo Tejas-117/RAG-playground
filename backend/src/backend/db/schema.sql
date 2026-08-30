@@ -196,12 +196,14 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
         status IN ('pending', 'running', 'completed', 'failed')
     ),
     current_stage TEXT CHECK (
-        current_stage IS NULL OR current_stage IN ('chunking', 'embedding')
+        current_stage IS NULL OR
+        current_stage IN ('chunking', 'embedding', 'retrieval')
     ),
     chunk_set_reused INTEGER CHECK (chunk_set_reused IN (0, 1)),
     vector_index_reused INTEGER CHECK (vector_index_reused IN (0, 1)),
     chunking_duration_ms INTEGER CHECK (chunking_duration_ms >= 0),
     embedding_duration_ms INTEGER CHECK (embedding_duration_ms >= 0),
+    retrieval_duration_ms INTEGER CHECK (retrieval_duration_ms >= 0),
     created_at TEXT NOT NULL,
     started_at TEXT,
     completed_at TEXT,
@@ -227,6 +229,7 @@ CREATE TABLE IF NOT EXISTS pipeline_run (
             AND vector_index_reused IS NOT NULL
             AND chunking_duration_ms IS NOT NULL
             AND embedding_duration_ms IS NOT NULL
+            AND retrieval_duration_ms IS NOT NULL
             AND current_stage IS NULL
             AND started_at IS NOT NULL
             AND completed_at IS NOT NULL

@@ -15,12 +15,14 @@ from backend.db.connection import connect
 from backend.db.repositories.runs import (
     InvalidRunStateError,
     claim_next_pending_run,
-    complete_run,
+    complete_run_with_retrieval,
 )
 from backend.embedding.models import (
     EmbeddingBatch,
     EmbeddingInputPurpose,
     EmbeddingProviderUnavailableError,
+    VectorSearchHit,
+    VectorStoreError,
 )
 from backend.ingestion.chunkers.models import TokenizedText, TokenOffset
 from backend.ingestion.chunkers.tokenizer import TokenizerAssetError
@@ -211,6 +213,32 @@ class RunTestVectorStore:
         # IDs are the authoritative one-to-one vector record identity.
         return len(self.collections[collection_name]["ids"])
 
+    def query(
+        self,
+        collection_name: str,
+        vector: list[float],
+        top_k: int,
+    ) -> tuple[VectorSearchHit, ...]:
+        """Return deterministic ranked chunk IDs from one test collection.
+
+        Args:
+            collection_name: Existing collection containing the indexed chunks.
+            vector: Query vector whose shape was validated before this call.
+            top_k: Maximum number of stored chunk IDs to return.
+
+        Returns:
+            Ranked vector hits with deterministic raw cosine distances.
+        """
+        # Preserve insertion order as deterministic nearest-neighbor order for tests.
+        chunk_ids = self.collections[collection_name]["ids"][:top_k]
+        return tuple(
+            VectorSearchHit(
+                chunk_id=str(chunk_id),
+                raw_distance=float(index) / 10,
+            )
+            for index, chunk_id in enumerate(chunk_ids)
+        )
+
     def delete_collection(self, name: str) -> None:
         """Delete one test collection during rollback or reuse races.
 
@@ -222,6 +250,32 @@ class RunTestVectorStore:
         """
         # Match the production adapter's idempotent cleanup behavior.
         self.collections.pop(name, None)
+
+
+class UnavailableRunTestVectorStore(RunTestVectorStore):
+    """Build indexes successfully but simulate a retrieval query failure."""
+
+    def query(
+        self,
+        collection_name: str,
+        vector: list[float],
+        top_k: int,
+    ) -> tuple[VectorSearchHit, ...]:
+        """Raise the provider-neutral vector-store retrieval failure.
+
+        Args:
+            collection_name: Existing collection that cannot be searched.
+            vector: Valid query vector submitted by the executor.
+            top_k: Maximum result count requested by retrieval.
+
+        Returns:
+            Never returns because the simulated store is unavailable.
+
+        Raises:
+            VectorStoreError: Always, to exercise retrieval failure handling.
+        """
+        # Hide the simulated internal message behind the executor's safe error mapping.
+        raise VectorStoreError("simulated vector query failure")
 
 
 def _run_payload() -> dict[str, object]:
@@ -415,6 +469,29 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
             completed_run["chunking"]["chunk_count"],
         )
 
+        # Retrieval must persist ranked references before the run becomes completed.
+        with connect() as connection:
+            retrieval_result = connection.execute(
+                """
+                SELECT requested_top_k, returned_count, distance_metric, duration_ms
+                FROM retrieval_result WHERE pipeline_run_id = ?
+                """,
+                (completed_run["id"],),
+            ).fetchone()
+            retrieved_chunks = connection.execute(
+                """
+                SELECT rank, chunk_id, raw_distance FROM retrieved_chunk
+                ORDER BY rank
+                """
+            ).fetchall()
+
+        self.assertEqual(retrieval_result["requested_top_k"], 10)
+        self.assertEqual(retrieval_result["returned_count"], 1)
+        self.assertEqual(retrieval_result["distance_metric"], "cosine")
+        self.assertGreaterEqual(retrieval_result["duration_ms"], 0)
+        self.assertEqual(len(retrieved_chunks), 1)
+        self.assertEqual(retrieved_chunks[0]["rank"], 1)
+
         # The saved snapshot must exactly match the resolved API configuration.
         with sqlite3.connect(self.database_path) as connection:
             row = connection.execute(
@@ -438,6 +515,36 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
         # Keep missing run identity distinct from provider or execution failures.
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"]["code"], "run_not_found")
+
+    async def test_poll_accepts_active_retrieval_stage(self) -> None:
+        """Verify the runs API contract represents retrieval lifecycle state.
+
+        Args:
+            None.
+
+        Returns:
+            None. Assertions verify retrieval is accepted as a current stage.
+        """
+        enqueue_response = await self._request("POST", "/runs", _run_payload())
+        claimed_run = claim_next_pending_run()
+
+        # Isolate the transport enum without running provider work in this API test.
+        with connect() as connection:
+            connection.execute(
+                """
+                UPDATE pipeline_run SET current_stage = 'retrieval'
+                WHERE id = ? AND status = 'running'
+                """,
+                (claimed_run["id"],),
+            )
+
+        poll_response = await self._request(
+            "GET",
+            f"/runs/{enqueue_response.json()['id']}",
+        )
+
+        self.assertEqual(poll_response.status_code, 200)
+        self.assertEqual(poll_response.json()["current_stage"], "retrieval")
 
     async def test_enqueue_rejects_invalid_inputs(self) -> None:
         """Verify blank questions and unknown corpora never enter the queue.
@@ -609,6 +716,52 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first_run["embedding"]["reused"])
         self.assertTrue(second_run["embedding"]["reused"])
 
+    async def test_retrieval_failure_preserves_ready_upstream_artifacts(self) -> None:
+        """Verify a vector query failure leaves no partial retrieval result.
+
+        Args:
+            None.
+
+        Returns:
+            None. Assertions verify retrieval failure state and artifact retention.
+        """
+        failing_store = UnavailableRunTestVectorStore()
+        self.executor = PipelineExecutor(
+            tokenizer=RunTestTokenizer(),
+            embedding_provider=RunTestEmbeddingProvider(),
+            vector_store=failing_store,
+        )
+        enqueue_response = await self._request("POST", "/runs", _run_payload())
+        claimed_run = claim_next_pending_run()
+
+        # Retrieval fails only after ready chunk and vector artifacts are attached.
+        with self.assertRaises(PipelineRunExecutionError):
+            self.executor.execute(claimed_run["id"])
+
+        poll_response = await self._request(
+            "GET",
+            f"/runs/{enqueue_response.json()['id']}",
+        )
+        failed_run = poll_response.json()
+        self.assertEqual(failed_run["status"], "failed")
+        self.assertEqual(failed_run["chunking"]["status"], "completed")
+        self.assertEqual(failed_run["embedding"]["status"], "completed")
+        self.assertEqual(failed_run["error"]["stage"], "retrieval")
+        self.assertEqual(
+            failed_run["error"]["code"],
+            "retrieval_vector_store_unavailable",
+        )
+
+        # A failed search must not leave a result parent or ranked children behind.
+        with connect() as connection:
+            result_count = connection.execute(
+                "SELECT COUNT(*) FROM retrieval_result"
+            ).fetchone()[0]
+            hit_count = connection.execute(
+                "SELECT COUNT(*) FROM retrieved_chunk"
+            ).fetchone()[0]
+        self.assertEqual((result_count, hit_count), (0, 0))
+
     async def test_completed_run_rejects_second_completion(self) -> None:
         """Verify terminal run history cannot be overwritten by a retry.
 
@@ -623,10 +776,12 @@ class PipelineRunRouteTestCase(unittest.IsolatedAsyncioTestCase):
 
         # Repeating a terminal transition must fail instead of mutating history.
         with self.assertRaises(InvalidRunStateError):
-            complete_run(
+            complete_run_with_retrieval(
                 completed_run["id"],
                 completed_run["embedding"]["vector_index_id"],
-                True,
+                10,
+                "cosine",
+                (),
                 1,
                 2,
             )

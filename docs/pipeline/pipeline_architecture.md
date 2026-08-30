@@ -275,14 +275,15 @@ The first backend run slice supports a single ad hoc question. `POST /runs`
 validates the selected immutable corpus and backend-supported configuration,
 persists a pending immutable run, and returns `202`. The application-owned local
 worker claims queued runs and uses `PipelineExecutor` to execute chunking and
-embedding. The executor links the ready chunk set and vector index directly
-from `pipeline_run` and records whether each artifact was reused. The question
-remains on the run because it is query-specific.
+embedding, followed by query-specific retrieval. The executor links the ready
+chunk set and vector index directly from `pipeline_run`, records whether each
+artifact was reused, then saves ranked chunk references for the question.
 
 Runs progress through `pending`, `running`, and either `completed` or `failed`.
 At this implementation stage, `completed` means every currently executable
-stage—chunking and embedding—finished successfully. `current_stage` identifies
-active work, and `GET /runs/{run_id}` provides the stable polling resource.
+stage—chunking, embedding, and retrieval—finished successfully.
+`current_stage` identifies active work, and `GET /runs/{run_id}` provides the
+stable polling resource.
 Failed runs retain safe structured errors and timing, while invalid requests
 rejected before enqueueing create no run.
 
@@ -343,7 +344,7 @@ The executor is the sequencing boundary for later services:
 PipelineExecutor
   -> ChunkingService
   -> EmbeddingIndexService
-  -> RetrievalService       # future
+  -> RetrievalService
   -> GenerationService      # future
   -> EvaluationService      # future
 ```

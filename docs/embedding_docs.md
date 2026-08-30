@@ -14,7 +14,8 @@ POST /runs
   -> call the configured embedding provider over HTTP
   -> validate and store explicit vectors in Chroma
   -> persist ready vector_index metadata in SQLite
-  -> complete pipeline_run
+  -> attach vector_index and advance pipeline_run to retrieval
+  -> retrieve ranked chunks before completing pipeline_run
 
 GET /runs/{run_id}
   -> return current stage, artifact summaries, timings, or safe failure
@@ -62,9 +63,10 @@ the selected model cannot accept is reported as `embedding_input_too_large`
 instead of silently embedding truncated content. Batch size and the 120-second
 per-request timeout are backend guardrails, not experiment parameters.
 
-For `nomic-embed-text`, document inputs receive the `search_document:` prefix.
-Future query embedding will use `search_query:`. The versioned input policy is
-part of index compatibility, while persisted chunk text remains unchanged.
+For `nomic-embed-text`, document inputs receive the `search_document:` prefix
+and retrieval questions receive `search_query:`. The versioned input policy is
+part of index compatibility, while persisted chunk and question text remain
+unchanged.
 
 ## Validation and Atomic Visibility
 
@@ -134,3 +136,7 @@ include:
 If embedding fails after chunking succeeds, the run retains its ready
 `chunk_set_id`. It has no `vector_index_id`, so a partial or incompatible index
 cannot be mistaken for a completed artifact.
+
+After embedding succeeds, the executor attaches the ready vector index and
+advances the run to retrieval. A later retrieval failure therefore retains both
+ready upstream artifact IDs for provenance.

@@ -68,7 +68,7 @@ const runEmbeddingResponseSchema = z.object({
 const runFailureSchema = z.object({
   code: z.string().min(1),
   message: z.string().min(1),
-  stage: z.enum(["chunking", "embedding"]).nullable(),
+  stage: z.enum(["chunking", "embedding", "retrieval"]).nullable(),
   details: z.record(z.string(), z.unknown()),
 });
 
@@ -76,7 +76,7 @@ const runFailureSchema = z.object({
 const runResponseSchema = runCreateRequestSchema.extend({
   id: z.string().min(1),
   status: z.enum(["pending", "running", "completed", "failed"]),
-  current_stage: z.enum(["chunking", "embedding"]).nullable(),
+  current_stage: z.enum(["chunking", "embedding", "retrieval"]).nullable(),
   created_at: z.string().min(1),
   started_at: z.string().min(1).nullable(),
   completed_at: z.string().min(1).nullable(),

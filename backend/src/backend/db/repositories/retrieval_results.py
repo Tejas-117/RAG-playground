@@ -48,6 +48,49 @@ def save_retrieval_result(
         RetrievalArtifactMismatchError: If run, index, or chunks are incompatible.
         sqlite3.IntegrityError: If this run already owns a retrieval result.
     """
+    # Use the shared connection-aware writer so standalone and pipeline writes agree.
+    with connect() as connection:
+        result_id = insert_retrieval_result(
+            connection,
+            pipeline_run_id,
+            vector_index_id,
+            requested_top_k,
+            distance_metric,
+            duration_ms,
+            hits,
+        )
+
+    return get_retrieval_result(result_id)
+
+
+def insert_retrieval_result(
+    connection: sqlite3.Connection,
+    pipeline_run_id: str,
+    vector_index_id: str,
+    requested_top_k: int,
+    distance_metric: DistanceMetric | str,
+    duration_ms: int,
+    hits: tuple[HydratedVectorSearchHit, ...],
+) -> str:
+    """Insert one validated retrieval result using an existing transaction.
+
+    Args:
+        connection: Active SQLite transaction that owns the complete operation.
+        pipeline_run_id: Stable run that owns this non-reusable result.
+        vector_index_id: Exact ready index searched for the run.
+        requested_top_k: Maximum result count requested by retrieval config.
+        distance_metric: Raw-distance semantics used by the vector index.
+        duration_ms: Non-negative retrieval stage wall-clock duration.
+        hits: Ranked hydrated hits produced from the searched index's chunk set.
+
+    Returns:
+        Deterministic identifier of the inserted retrieval result.
+
+    Raises:
+        InvalidRetrievalResultError: If counts, ranks, values, or metric are invalid.
+        RetrievalArtifactMismatchError: If run, index, or chunks are incompatible.
+        sqlite3.IntegrityError: If relational constraints reject the result.
+    """
     normalized_metric = _validate_result_values(
         requested_top_k,
         distance_metric,
@@ -62,46 +105,45 @@ def save_retrieval_result(
     )
     created_at = _utc_timestamp()
 
-    # Validate every relationship and insert parent plus children in one transaction.
-    with connect() as connection:
-        chunk_set_id = _validate_artifact_ownership(
-            connection,
+    # Validate ownership before making either the parent or ranked children visible.
+    chunk_set_id = _validate_artifact_ownership(
+        connection,
+        pipeline_run_id,
+        vector_index_id,
+        normalized_metric,
+    )
+    _validate_hit_ownership(connection, chunk_set_id, hits)
+    connection.execute(
+        """
+        INSERT INTO retrieval_result (
+            id, pipeline_run_id, vector_index_id, requested_top_k,
+            returned_count, distance_metric, duration_ms, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            result_id,
             pipeline_run_id,
             vector_index_id,
+            requested_top_k,
+            len(hits),
             normalized_metric,
-        )
-        _validate_hit_ownership(connection, chunk_set_id, hits)
+            duration_ms,
+            created_at,
+        ),
+    )
+
+    # Persist only stable references and raw score data in retrieval order.
+    for hit in hits:
         connection.execute(
             """
-            INSERT INTO retrieval_result (
-                id, pipeline_run_id, vector_index_id, requested_top_k,
-                returned_count, distance_metric, duration_ms, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO retrieved_chunk (
+                retrieval_result_id, rank, chunk_id, raw_distance
+            ) VALUES (?, ?, ?, ?)
             """,
-            (
-                result_id,
-                pipeline_run_id,
-                vector_index_id,
-                requested_top_k,
-                len(hits),
-                normalized_metric,
-                duration_ms,
-                created_at,
-            ),
+            (result_id, hit.rank, hit.chunk_id, hit.raw_distance),
         )
 
-        # Persist only stable references and raw score data in retrieval order.
-        for hit in hits:
-            connection.execute(
-                """
-                INSERT INTO retrieved_chunk (
-                    retrieval_result_id, rank, chunk_id, raw_distance
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (result_id, hit.rank, hit.chunk_id, hit.raw_distance),
-            )
-
-    return get_retrieval_result(result_id)
+    return result_id
 
 
 def get_retrieval_result(retrieval_result_id: str) -> dict[str, Any]:

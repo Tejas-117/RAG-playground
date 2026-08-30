@@ -6,7 +6,12 @@ from typing import Any
 from uuid import uuid4
 
 from backend.db.connection import connect
-from backend.pipeline.configs import PipelineConfig
+from backend.db.repositories.retrieval_results import (
+    RetrievalArtifactMismatchError,
+    insert_retrieval_result,
+)
+from backend.pipeline.configs import DistanceMetric, PipelineConfig
+from backend.retrieval.models import HydratedVectorSearchHit
 
 
 class CorpusNotFoundError(LookupError):
@@ -27,6 +32,10 @@ class ChunkSetNotReadyError(RuntimeError):
 
 class VectorIndexNotReadyError(RuntimeError):
     """Report that run completion references a vector index that is not ready."""
+
+
+class VectorIndexArtifactMismatchError(RuntimeError):
+    """Report a ready vector index built from a different run chunk set."""
 
 
 def _utc_timestamp() -> str:
@@ -96,11 +105,12 @@ def create_pending_run(
                 effective_config_json, status, current_stage,
                 chunk_set_reused, vector_index_reused,
                 chunking_duration_ms, embedding_duration_ms,
+                retrieval_duration_ms,
                 created_at, started_at, completed_at, duration_ms,
                 error_code, error_details_json
             ) VALUES (
                 ?, ?, NULL, NULL, ?, ?, 'pending', NULL,
-                NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL
+                NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL
             )
             """,
             (run_id, corpus_id, question, effective_config_json, created_at),
@@ -284,62 +294,166 @@ def record_chunking_result(
     return get_run(run_id)
 
 
-def complete_run(
+def record_embedding_result(
     run_id: str,
     vector_index_id: str,
     vector_index_reused: bool,
     embedding_duration_ms: int,
-    total_duration_ms: int,
 ) -> dict[str, Any]:
-    """Complete a running run with its exact ready vector index.
+    """Attach a ready compatible vector index and advance to retrieval.
 
     Args:
         run_id: Stable identifier of the running pipeline execution.
         vector_index_id: Ready reusable vector index selected by the executor.
         vector_index_reused: Whether this execution reused the index.
         embedding_duration_ms: Time spent resolving the embedding stage.
-        total_duration_ms: Total background pipeline duration.
 
     Returns:
-        Materialized completed run with both reusable artifacts.
+        Materialized running run now positioned at retrieval.
 
     Raises:
         VectorIndexNotReadyError: If the vector index is absent or not ready.
+        VectorIndexArtifactMismatchError: If the index uses another chunk set.
         InvalidRunStateError: If the run is not actively embedding.
     """
-    completed_at = _utc_timestamp()
-
-    # Validate the final artifact and lifecycle transition in one transaction.
+    # Validate compatibility before exposing the index to query-time retrieval.
     with connect() as connection:
         vector_index = connection.execute(
-            "SELECT id FROM vector_index WHERE id = ? AND status = 'ready'",
+            """
+            SELECT id, chunk_set_id FROM vector_index
+            WHERE id = ? AND status = 'ready'
+            """,
             (vector_index_id,),
         ).fetchone()
 
-        # A completed run may only reference a fully materialized vector collection.
+        # Retrieval may only search a fully materialized vector collection.
         if vector_index is None:
             raise VectorIndexNotReadyError(vector_index_id)
+
+        run = connection.execute(
+            """
+            SELECT status, current_stage, chunk_set_id
+            FROM pipeline_run WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+        # Protect terminal, missing, or concurrently changed run history.
+        if (
+            run is None
+            or run["status"] != "running"
+            or run["current_stage"] != "embedding"
+        ):
+            raise InvalidRunStateError(
+                f"Pipeline run '{run_id}' cannot advance to retrieval."
+            )
+
+        # An index cannot be attached when it was built from another chunk artifact.
+        if run["chunk_set_id"] != vector_index["chunk_set_id"]:
+            raise VectorIndexArtifactMismatchError(vector_index_id)
 
         cursor = connection.execute(
             """
             UPDATE pipeline_run
             SET vector_index_id = ?, vector_index_reused = ?,
-                embedding_duration_ms = ?, status = 'completed',
-                current_stage = NULL, completed_at = ?, duration_ms = ?,
-                error_code = NULL, error_details_json = NULL
+                embedding_duration_ms = ?, current_stage = 'retrieval'
             WHERE id = ? AND status = 'running' AND current_stage = 'embedding'
             """,
             (
                 vector_index_id,
                 int(vector_index_reused),
                 embedding_duration_ms,
-                completed_at,
-                total_duration_ms,
                 run_id,
             ),
         )
 
-        # Preserve immutable terminal history if the run was already changed.
+        # A concurrent lifecycle change must not leave an index partially attached.
+        if cursor.rowcount != 1:
+            raise InvalidRunStateError(
+                f"Pipeline run '{run_id}' cannot advance to retrieval."
+            )
+
+    return get_run(run_id)
+
+
+def complete_run_with_retrieval(
+    run_id: str,
+    vector_index_id: str,
+    requested_top_k: int,
+    distance_metric: DistanceMetric | str,
+    hits: tuple[HydratedVectorSearchHit, ...],
+    retrieval_duration_ms: int,
+    total_duration_ms: int,
+) -> dict[str, Any]:
+    """Persist ranked retrieval output and complete its run atomically.
+
+    Args:
+        run_id: Stable identifier of the running pipeline execution.
+        vector_index_id: Exact ready vector index searched by retrieval.
+        requested_top_k: Maximum result count from the immutable run config.
+        distance_metric: Raw-distance semantics of the searched vector index.
+        hits: Ranked hydrated chunks returned by retrieval.
+        retrieval_duration_ms: Time spent resolving the retrieval stage.
+        total_duration_ms: Total background pipeline duration.
+
+    Returns:
+        Materialized completed run retaining all successful stage artifacts.
+
+    Raises:
+        InvalidRunStateError: If the run is not actively retrieving.
+        RetrievalArtifactMismatchError: If the run references another index.
+        InvalidRetrievalResultError: If retrieval result values are malformed.
+        sqlite3.IntegrityError: If relational persistence rejects any write.
+    """
+    completed_at = _utc_timestamp()
+
+    # One transaction prevents either a partial ranked result or false completion.
+    with connect() as connection:
+        run = connection.execute(
+            """
+            SELECT status, current_stage, vector_index_id
+            FROM pipeline_run WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+        # Only the active retrieval stage may create the run's immutable result.
+        if (
+            run is None
+            or run["status"] != "running"
+            or run["current_stage"] != "retrieval"
+        ):
+            raise InvalidRunStateError(
+                f"Pipeline run '{run_id}' cannot transition to completed."
+            )
+
+        # Reject an executor result produced from any index other than the attached one.
+        if run["vector_index_id"] != vector_index_id:
+            raise RetrievalArtifactMismatchError(
+                "The searched vector index does not belong to the pipeline run."
+            )
+
+        insert_retrieval_result(
+            connection,
+            run_id,
+            vector_index_id,
+            requested_top_k,
+            distance_metric,
+            retrieval_duration_ms,
+            hits,
+        )
+        cursor = connection.execute(
+            """
+            UPDATE pipeline_run
+            SET retrieval_duration_ms = ?, status = 'completed',
+                current_stage = NULL, completed_at = ?, duration_ms = ?,
+                error_code = NULL, error_details_json = NULL
+            WHERE id = ? AND status = 'running' AND current_stage = 'retrieval'
+            """,
+            (retrieval_duration_ms, completed_at, total_duration_ms, run_id),
+        )
+
+        # Raising here rolls back both retrieval rows and the lifecycle transition.
         if cursor.rowcount != 1:
             raise InvalidRunStateError(
                 f"Pipeline run '{run_id}' cannot transition to completed."
