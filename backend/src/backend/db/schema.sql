@@ -254,3 +254,40 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_run_vector_index_id
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_run_queue
     ON pipeline_run (status, created_at);
+
+-- One immutable retrieval result for one pipeline run and its exact vector
+-- index. Text and source metadata remain normalized in the chunk table.
+CREATE TABLE IF NOT EXISTS retrieval_result (
+    id TEXT PRIMARY KEY,
+    pipeline_run_id TEXT NOT NULL UNIQUE
+        REFERENCES pipeline_run(id) ON DELETE CASCADE,
+    vector_index_id TEXT NOT NULL
+        REFERENCES vector_index(id) ON DELETE RESTRICT,
+    requested_top_k INTEGER NOT NULL CHECK (requested_top_k > 0),
+    returned_count INTEGER NOT NULL CHECK (
+        returned_count >= 0 AND returned_count <= requested_top_k
+    ),
+    distance_metric TEXT NOT NULL CHECK (
+        distance_metric IN ('cosine', 'dot_product', 'euclidean')
+    ),
+    duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_retrieval_result_vector_index_id
+    ON retrieval_result (vector_index_id);
+
+-- Ranked references to immutable chunks returned by vector search. Raw
+-- distances are retained without converting distance into similarity.
+CREATE TABLE IF NOT EXISTS retrieved_chunk (
+    retrieval_result_id TEXT NOT NULL
+        REFERENCES retrieval_result(id) ON DELETE CASCADE,
+    rank INTEGER NOT NULL CHECK (rank > 0),
+    chunk_id TEXT NOT NULL REFERENCES chunk(id) ON DELETE RESTRICT,
+    raw_distance REAL NOT NULL,
+    PRIMARY KEY (retrieval_result_id, rank),
+    UNIQUE (retrieval_result_id, chunk_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_retrieved_chunk_chunk_id
+    ON retrieved_chunk (chunk_id);

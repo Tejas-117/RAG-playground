@@ -41,6 +41,8 @@ def test_schema_creates_corpus_and_document_tables() -> None:
         "parsed_block",
         "chunk_set",
         "chunk",
+        "retrieval_result",
+        "retrieved_chunk",
         "pipeline_run",
     }.issubset(table_names)
     assert not {"corpus_version", "corpus_version_document"}.intersection(table_names)
