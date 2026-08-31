@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING, Any
 
-from backend.pipeline.configs import PipelineConfig
+from backend.pipeline.configs import PipelineConfig, PreparationConfig
 
 if TYPE_CHECKING:
     from backend.api.routers.pipeline_options import (
@@ -170,63 +170,8 @@ def validate_pipeline_config(
     Raises:
         InvalidPipelineConfigurationError: If any option or combination is unsupported.
     """
-    # Resolve the selected chunker so strategy-specific catalog capabilities are enforced.
-    selected_strategy = next(
-        (
-            strategy
-            for strategy in options.chunking.strategies
-            if strategy.value == configuration.chunking.strategy.value
-        ),
-        None,
-    )
-
-    # Reject code-level strategies that are not currently exposed for execution.
-    if selected_strategy is None:
-        raise InvalidPipelineConfigurationError(
-            "configuration.chunking.strategy",
-            f"Chunking strategy '{configuration.chunking.strategy.value}' is not supported.",
-        )
-
-    _validate_numeric_setting(
-        "configuration.chunking.chunk_size_tokens",
-        configuration.chunking.chunk_size_tokens,
-        options.chunking.chunk_size_tokens,
-    )
-    _validate_numeric_setting(
-        "configuration.chunking.chunk_overlap_tokens",
-        configuration.chunking.chunk_overlap_tokens or 0,
-        options.chunking.chunk_overlap_tokens,
-    )
-
-    # Guard against overlap if a future catalog disables it for another strategy.
-    if (
-        not selected_strategy.supports_overlap
-        and configuration.chunking.chunk_overlap_tokens != 0
-    ):
-        raise InvalidPipelineConfigurationError(
-            "configuration.chunking.chunk_overlap_tokens",
-            "The selected chunking strategy does not support overlap.",
-        )
-
-    embedding_provider = _find_provider(
-        options.embedding.providers,
-        configuration.embedding.provider,
-        "configuration.embedding.provider",
-    )
-    _validate_model(
-        embedding_provider,
-        configuration.embedding.model,
-        "configuration.embedding.model",
-    )
-
-    # Ensure the requested vector score semantics are implemented by the backend.
-    if configuration.embedding.distance_metric.value not in {
-        metric.value for metric in options.embedding.distance_metrics
-    }:
-        raise InvalidPipelineConfigurationError(
-            "configuration.embedding.distance_metric",
-            "The selected distance metric is not supported.",
-        )
+    # Validate the shared preparation stages before checking query-specific stages.
+    validate_preparation_config(configuration, options)
 
     _validate_numeric_setting(
         "configuration.retrieval.top_k",
@@ -306,3 +251,78 @@ def validate_pipeline_config(
                 "configuration.evaluation.answer_metrics",
                 f"Evaluation metric '{metric}' requires a reference answer.",
             )
+
+
+def validate_preparation_config(
+    configuration: PreparationConfig | PipelineConfig,
+    options: "PipelineOptionsResponse",
+) -> None:
+    """Validate chunking and embedding settings against the option catalog.
+
+    Args:
+        configuration: Configuration containing chunking and embedding stages.
+        options: Validated backend-owned pipeline option catalog.
+
+    Returns:
+        None. The configuration is unchanged when it is compatible.
+
+    Raises:
+        InvalidPipelineConfigurationError: If a preparation option is unsupported.
+    """
+    # Resolve the selected chunker so strategy-specific catalog capabilities are enforced.
+    selected_strategy = next(
+        (
+            strategy
+            for strategy in options.chunking.strategies
+            if strategy.value == configuration.chunking.strategy.value
+        ),
+        None,
+    )
+
+    # Reject code-level strategies that are not currently exposed for execution.
+    if selected_strategy is None:
+        raise InvalidPipelineConfigurationError(
+            "configuration.chunking.strategy",
+            f"Chunking strategy '{configuration.chunking.strategy.value}' is not supported.",
+        )
+
+    _validate_numeric_setting(
+        "configuration.chunking.chunk_size_tokens",
+        configuration.chunking.chunk_size_tokens,
+        options.chunking.chunk_size_tokens,
+    )
+    _validate_numeric_setting(
+        "configuration.chunking.chunk_overlap_tokens",
+        configuration.chunking.chunk_overlap_tokens or 0,
+        options.chunking.chunk_overlap_tokens,
+    )
+
+    # Guard against overlap if a future catalog disables it for another strategy.
+    if (
+        not selected_strategy.supports_overlap
+        and configuration.chunking.chunk_overlap_tokens != 0
+    ):
+        raise InvalidPipelineConfigurationError(
+            "configuration.chunking.chunk_overlap_tokens",
+            "The selected chunking strategy does not support overlap.",
+        )
+
+    embedding_provider = _find_provider(
+        options.embedding.providers,
+        configuration.embedding.provider,
+        "configuration.embedding.provider",
+    )
+    _validate_model(
+        embedding_provider,
+        configuration.embedding.model,
+        "configuration.embedding.model",
+    )
+
+    # Ensure the requested vector score semantics are implemented by the backend.
+    if configuration.embedding.distance_metric.value not in {
+        metric.value for metric in options.embedding.distance_metrics
+    }:
+        raise InvalidPipelineConfigurationError(
+            "configuration.embedding.distance_metric",
+            "The selected distance metric is not supported.",
+        )

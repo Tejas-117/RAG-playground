@@ -18,7 +18,20 @@ A corpus should have a stable ID and a manifest/content hash derived from its do
 
 ## 2. The pipeline
 
-When the user selects an experiment configuration and clicks **Run**, the backend executes this logical pipeline:
+Preparation and experiments are separate user workflows. The preparation flow
+executes the reusable, corpus-wide stages:
+
+```text
+Immutable corpus
+  -> parse documents during upload
+  -> create named prepared-index request
+  -> build or reuse chunk set
+  -> build or reuse vector index
+```
+
+An experiment later selects a ready prepared-index ID and executes query-specific
+retrieval, generation, and evaluation. The existing single-question `/runs` flow
+still executes the complete legacy pipeline until benchmark runs replace it:
 
 ```text
 Immutable corpus
@@ -157,9 +170,35 @@ An index must never be silently reused if any compatibility-defining input chang
 
 Cosine, dot-product, and Euclidean values have different meanings. Scores must be labelled accurately or normalized before comparison/display.
 
+### Named preparation resource: `prepared_index`
+
+A `prepared_index` is the user-facing name and asynchronous preparation
+lifecycle wrapped around reusable technical artifacts. It is not a second copy
+of the chunks or vectors.
+
+The row is created as soon as `POST /indexes` is accepted, before a `chunk_set`
+or `vector_index` necessarily exists. It therefore stores:
+
+- the user-provided name and selected corpus
+- an immutable snapshot of resolved chunking and embedding configuration
+- pending, running, ready, or failed lifecycle state and current stage
+- links to the exact chunk set and vector index after each stage succeeds
+- reuse decisions, timings, timestamps, and safe structured failure details
+
+Names are display labels, not identity. Duplicate names are allowed. Clients
+must select a prepared index by `prepared_index.id`; they can distinguish equal
+labels using the prepared-index ID, vector-index ID, and creation timestamp.
+
+Multiple named prepared indexes may reference the same fingerprint-compatible
+`vector_index`. In that case they also reference the same Chroma collection.
+This is deliberate artifact reuse: the prepared rows duplicate only their
+request configuration and lifecycle provenance, not chunk text or vectors.
+
 ### Run artifact
 
-A run is an immutable record of what the user asked the system to execute at a specific moment. Store:
+A run is an immutable record of what the user asked the system to execute at a
+specific moment. Under the redesigned flow it will be created after a ready
+prepared index is selected. Store:
 
 - run ID and corpus ID
 - immutable snapshot of the effective configuration, including resolved defaults

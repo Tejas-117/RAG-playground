@@ -6,7 +6,17 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api.routers import corpora, pipeline_options, runs, testing, uploads
+from backend.api.routers import (
+    corpora,
+    indexes,
+    pipeline_options,
+    runs,
+    testing,
+    uploads,
+)
+from backend.db.repositories.prepared_indexes import (
+    fail_interrupted_prepared_indexes,
+)
 from backend.db.repositories.runs import fail_interrupted_runs
 from backend.logging_config import configure_logging
 from backend.pipeline.worker import PipelineRunWorker
@@ -26,6 +36,7 @@ async def application_lifespan(application: FastAPI) -> AsyncIterator[None]:
         Control while the API and background worker are available.
     """
     # Terminalize work abandoned by a previous process before claiming queued jobs.
+    fail_interrupted_prepared_indexes()
     fail_interrupted_runs()
     worker = PipelineRunWorker()
     worker_task = asyncio.create_task(worker.run_forever())
@@ -52,6 +63,7 @@ app.add_middleware(
 app.include_router(uploads.router)
 app.include_router(corpora.router)
 app.include_router(pipeline_options.router)
+app.include_router(indexes.router)
 app.include_router(runs.router)
 app.include_router(testing.router)
 

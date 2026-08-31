@@ -183,6 +183,82 @@ CREATE TABLE IF NOT EXISTS vector_index (
 CREATE INDEX IF NOT EXISTS idx_vector_index_chunk_set_id
     ON vector_index (chunk_set_id);
 
+-- A user-facing named preparation request. It stores the immutable chunking and
+-- embedding instructions needed by the asynchronous worker before reusable
+-- artifacts exist, then links to the exact artifacts it built or reused.
+CREATE TABLE IF NOT EXISTS prepared_index (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL CHECK (
+        length(trim(name)) > 0 AND length(name) <= 100
+    ),
+    corpus_id TEXT NOT NULL REFERENCES corpus(id) ON DELETE RESTRICT,
+    chunk_set_id TEXT REFERENCES chunk_set(id) ON DELETE RESTRICT,
+    vector_index_id TEXT REFERENCES vector_index(id) ON DELETE RESTRICT,
+    effective_config_json TEXT NOT NULL CHECK (
+        json_valid(effective_config_json)
+        AND json_type(effective_config_json) = 'object'
+    ),
+    status TEXT NOT NULL CHECK (
+        status IN ('pending', 'running', 'ready', 'failed')
+    ),
+    current_stage TEXT CHECK (
+        current_stage IS NULL OR current_stage IN ('chunking', 'embedding')
+    ),
+    chunk_set_reused INTEGER CHECK (chunk_set_reused IN (0, 1)),
+    vector_index_reused INTEGER CHECK (vector_index_reused IN (0, 1)),
+    chunking_duration_ms INTEGER CHECK (chunking_duration_ms >= 0),
+    embedding_duration_ms INTEGER CHECK (embedding_duration_ms >= 0),
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    duration_ms INTEGER CHECK (duration_ms >= 0),
+    error_code TEXT,
+    error_details_json TEXT CHECK (
+        error_details_json IS NULL OR (
+            json_valid(error_details_json)
+            AND json_type(error_details_json) = 'object'
+        )
+    ),
+    CHECK (
+        status != 'running' OR (
+            started_at IS NOT NULL AND current_stage IS NOT NULL
+        )
+    ),
+    CHECK (
+        status != 'ready' OR (
+            chunk_set_id IS NOT NULL
+            AND vector_index_id IS NOT NULL
+            AND chunk_set_reused IS NOT NULL
+            AND vector_index_reused IS NOT NULL
+            AND chunking_duration_ms IS NOT NULL
+            AND embedding_duration_ms IS NOT NULL
+            AND current_stage IS NULL
+            AND started_at IS NOT NULL
+            AND completed_at IS NOT NULL
+            AND duration_ms IS NOT NULL
+        )
+    ),
+    CHECK (
+        status != 'failed' OR (
+            current_stage IS NULL
+            AND started_at IS NOT NULL
+            AND completed_at IS NOT NULL
+            AND duration_ms IS NOT NULL
+            AND error_code IS NOT NULL
+        )
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_prepared_index_corpus_id
+    ON prepared_index (corpus_id);
+
+CREATE INDEX IF NOT EXISTS idx_prepared_index_vector_index_id
+    ON prepared_index (vector_index_id);
+
+-- Queue lookup uses status and creation time; duplicate display names are valid.
+CREATE INDEX IF NOT EXISTS idx_prepared_index_queue
+    ON prepared_index (status, created_at);
+
 -- One immutable pipeline execution, including its resolved configuration,
 -- lifecycle, reusable chunk artifact, timing, and structured failure state.
 CREATE TABLE IF NOT EXISTS pipeline_run (

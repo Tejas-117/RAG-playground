@@ -134,6 +134,38 @@ on `corpus`, `document`, or `chunk_set`. Identical submissions create separate
 run rows, but their `chunk_set_id` values may match when the reusable fingerprint
 matches. Failures after creation remain as `failed` runs for auditability.
 
+## `prepared_index`
+
+Represents one user-facing named request to prepare an immutable corpus through
+chunking and embedding. It also acts as the durable asynchronous job record, so
+the worker can recover its instructions after the HTTP request has ended or the
+backend has restarted.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable application-generated selection identity. |
+| `name` | Trimmed user-facing label, limited to 100 characters. It is intentionally not unique. |
+| `corpus_id` | Immutable corpus to prepare. |
+| `effective_config_json` | Canonical immutable snapshot of resolved chunking and embedding configuration. |
+| `chunk_set_id` | Exact ready chunk artifact after chunking succeeds; nullable before then. |
+| `vector_index_id` | Exact ready technical vector artifact after embedding succeeds; nullable before then. |
+| `status` | `pending`, `running`, `ready`, or `failed`. |
+| `current_stage` | `chunking` or `embedding` while running; otherwise null. |
+| `chunk_set_reused` / `vector_index_reused` | Whether each compatible artifact existed before this request. |
+| `chunking_duration_ms` / `embedding_duration_ms` | Time this request spent resolving each stage. |
+| `created_at`, `started_at`, `completed_at`, `duration_ms` | Durable queue and execution lifecycle. |
+| `error_code` / `error_details_json` | Safe structured terminal failure details. |
+
+Configuration is stored on this row because a pending worker must know what to
+build before the referenced artifacts exist. After completion, `chunk_set` and
+`vector_index` retain their own technical compatibility configurations. This is
+small provenance duplication; chunks remain only in `chunk`, and vectors remain
+only in the vector store.
+
+Different prepared-index IDs and duplicate names can reference the same
+`vector_index_id` when their corpus, chunking, embedding, provider policy,
+dimensions, distance metric, and indexer inputs are compatible.
+
 ## `retrieval_result`
 
 Represents the immutable query-specific retrieval output for one pipeline run.
@@ -197,6 +229,14 @@ The `POST /uploads` route creates one corpus per upload request and one document
 row per validated file. Files are stored under `backend/uploads/` with UUID-based
 names; `original_filename` remains available for display. The `GET /corpora/`
 route returns the persisted corpus and nested document records.
+
+The `POST /indexes` route validates a required name, corpus, and chunking plus
+embedding configuration, then returns `202` with a pending durable request.
+`GET /indexes` lists newest records and accepts an optional `status` filter.
+`GET /indexes/{prepared_index_id}` returns one pollable lifecycle record. The
+application worker chooses the oldest pending job across prepared indexes and
+legacy pipeline runs so local embedding workloads do not compete. A restart
+marks abandoned running preparation requests as failed with a structured error.
 
 The `POST /runs` route validates a selected corpus, a single question, and the
 complete pipeline configuration, stores a `pending` row, and returns `202`

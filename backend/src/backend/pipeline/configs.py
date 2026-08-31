@@ -108,6 +108,18 @@ class EmbeddingConfig(BaseModel):
         return self
 
 
+class PreparationConfig(BaseModel):
+    """Capture the immutable stages required to build a prepared index.
+
+    Attributes:
+        chunking: Settings used to create or reuse the chunk set.
+        embedding: Settings used to create or reuse the compatible vector index.
+    """
+
+    chunking: ChunkingConfig
+    embedding: EmbeddingConfig
+
+
 class RetrievalConfig(BaseModel):
     """Configure nearest-neighbor retrieval for one pipeline run.
 
