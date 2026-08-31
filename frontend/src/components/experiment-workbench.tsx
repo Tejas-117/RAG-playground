@@ -17,10 +17,12 @@ import SelectControl from "@/components/select-control";
 import WorkbenchGridCanvas from "@/components/workbench-grid-canvas";
 import WorkbenchSidebar from "@/components/workbench-sidebar";
 import apiClient, { isCancel } from "@/lib/axios";
+import { listPreparedIndexes } from "@/lib/prepared-index-api";
 import {
   type PipelineOptions,
   parsePipelineOptions,
 } from "@/validation/pipeline-options";
+import { type PreparedIndex } from "@/validation/prepared-indexes";
 
 /** The default prompt remains local until the benchmark API accepts prompt templates. */
 const DEFAULT_SYSTEM_PROMPT =
@@ -34,6 +36,9 @@ const SIMILARITY_THRESHOLD_MAXIMUM = 1;
 
 /** Similarity thresholds advance in hundredth increments for practical tuning. */
 const SIMILARITY_THRESHOLD_STEP = 0.01;
+
+/** Eight characters distinguish artifact IDs without dominating selection rows. */
+const INDEX_ID_DISPLAY_LENGTH = 8;
 
 /** Editable retrieval, generation, and evaluation values for a benchmark definition. */
 type ExperimentConfiguration = {
@@ -73,6 +78,26 @@ function createDefaultConfiguration(options: PipelineOptions): ExperimentConfigu
       .filter((metric) => metric.selected_by_default)
       .map((metric) => metric.value),
   };
+}
+
+/**
+ * Formats a prepared-index timestamp for compact local selection metadata.
+ *
+ * @param timestamp - Backend UTC timestamp associated with index creation.
+ * @returns Localized date and time, or the backend value when parsing fails.
+ */
+function formatIndexTimestamp(timestamp: string): string {
+  const date = new Date(timestamp);
+
+  // Preserve the source value when a future backend timestamp cannot be parsed.
+  if (Number.isNaN(date.getTime())) {
+    return timestamp;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 /**
@@ -123,33 +148,39 @@ export default function ExperimentWorkbench() {
   // Stores retrieval, generation, and evaluation choices initialized from the catalog.
   const [configuration, setConfiguration] = useState<ExperimentConfiguration | null>(null);
 
-  // Filters the future prepared-index inventory without inventing records locally.
+  // Stores only ready prepared indexes that experiments may safely select.
+  const [preparedIndexes, setPreparedIndexes] = useState<PreparedIndex[]>([]);
+
+  // Filters the validated ready prepared-index inventory locally.
   const [indexSearch, setIndexSearch] = useState("");
 
-  // Reserves the selected index identifier for the upcoming indexes API contract.
-  const [selectedIndexId] = useState("");
+  // Stores the stable prepared-index identity selected for this benchmark draft.
+  const [selectedIndexId, setSelectedIndexId] = useState("");
 
   // Stores the local evaluation dataset selected for the benchmark.
   const [datasetFile, setDatasetFile] = useState<File | null>(null);
 
-  // Indicates that pipeline option data is being requested.
+  // Indicates that pipeline options and ready indexes are being requested.
   const [isLoading, setIsLoading] = useState(true);
 
   // Stores a readable loading or contract-validation failure.
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Increments when the user asks to retry the option request.
+  // Increments when the user asks to retry options and index inventory requests.
   const [loadAttempt, setLoadAttempt] = useState(0);
+
+  // Explains that benchmark submission remains deferred after inputs are complete.
+  const [benchmarkNotice, setBenchmarkNotice] = useState<string | null>(null);
 
   // Gives the run action direct access to the first incomplete field.
   const indexSearchInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Loads the existing provider and parameter catalog whenever the page opens or retries.
+  // Loads provider options and selectable ready indexes whenever the page retries.
   useEffect(() => {
     const abortController = new AbortController();
 
     /**
-     * Loads and validates options used by all supported experiment controls.
+     * Loads and validates options plus ready prepared indexes used by the form.
      *
      * @returns A promise resolved after loading, failure, and defaults are updated.
      */
@@ -158,13 +189,22 @@ export default function ExperimentWorkbench() {
       setLoadError(null);
 
       try {
-        const response = await apiClient.get<unknown>("/pipeline/options", {
-          signal: abortController.signal,
-        });
-        const validatedOptions = parsePipelineOptions(response.data);
+        const [optionsResponse, indexes] = await Promise.all([
+          apiClient.get<unknown>("/pipeline/options", {
+            signal: abortController.signal,
+          }),
+          listPreparedIndexes("ready", abortController.signal),
+        ]);
+        const validatedOptions = parsePipelineOptions(optionsResponse.data);
 
         setPipelineOptions(validatedOptions);
         setConfiguration(createDefaultConfiguration(validatedOptions));
+        setPreparedIndexes(indexes);
+
+        // Preserve selection only while the ready inventory still contains it.
+        setSelectedIndexId((current) =>
+          indexes.some((index) => index.id === current) ? current : "",
+        );
       } catch (error) {
         // Cancellation is expected when the user leaves while the request is active.
         if (isCancel(error)) {
@@ -173,6 +213,7 @@ export default function ExperimentWorkbench() {
 
         setPipelineOptions(null);
         setConfiguration(null);
+        setPreparedIndexes([]);
         setLoadError(
           error instanceof Error
             ? error.message
@@ -198,6 +239,25 @@ export default function ExperimentWorkbench() {
     (provider) => provider.value === configuration?.generationProvider,
   );
 
+  // Resolve the full selected record for lineage and duplicate-name disambiguation.
+  const selectedIndex = preparedIndexes.find(
+    (index) => index.id === selectedIndexId,
+  );
+
+  // Search ready names and stable artifact identities entirely within loaded data.
+  const normalizedIndexSearch = indexSearch.trim().toLocaleLowerCase();
+  const filteredPreparedIndexes = preparedIndexes.filter((index) => {
+    const searchableIdentity = [
+      index.name,
+      index.id,
+      index.embedding.vector_index_id ?? "",
+    ]
+      .join(" ")
+      .toLocaleLowerCase();
+
+    return searchableIdentity.includes(normalizedIndexSearch);
+  });
+
   // A benchmark needs both a reusable index and an evaluation dataset.
   const canRunExperiment = Boolean(
     selectedIndexId && datasetFile && configuration && !isLoading && !loadError,
@@ -209,14 +269,22 @@ export default function ExperimentWorkbench() {
    * @returns Nothing. The missing prepared-index field receives keyboard focus.
    */
   function handleRunExperiment(): void {
-    // The backend does not yet expose prepared indexes or benchmark creation.
+    setBenchmarkNotice(null);
+
+    // Focus the now-connected prepared-index inventory when selection is missing.
     if (!selectedIndexId) {
       indexSearchInputRef.current?.focus();
       indexSearchInputRef.current?.scrollIntoView({
         behavior: "smooth",
         block: "center",
       });
+      return;
     }
+
+    // Benchmark persistence is intentionally outside the prepared-index API scope.
+    setBenchmarkNotice(
+      "This benchmark configuration is ready. Benchmark creation is not connected yet.",
+    );
   }
 
   return (
@@ -275,7 +343,7 @@ export default function ExperimentWorkbench() {
             className="grid border-2 border-[var(--charcoal)] bg-white sm:grid-cols-4"
           >
             {[
-              ["Index", selectedIndexId ? "Selected" : "Required"],
+              ["Index", selectedIndex?.name ?? "Required"],
               ["Retrieve", configuration ? `Top ${configuration.topK}` : "Loading"],
               ["Generate", generationProvider?.label ?? "Loading"],
               ["Dataset", datasetFile?.name ?? "Required"],
@@ -311,6 +379,17 @@ export default function ExperimentWorkbench() {
               </div>
             ))}
           </section>
+
+          {/* The notice prevents a configured-but-unimplemented launch from being silent. */}
+          {benchmarkNotice ? (
+            <p
+              className="border border-[var(--border-strong)] bg-white px-4 py-3 \
+                text-xs text-[var(--tone-black)]"
+              aria-live="polite"
+            >
+              {benchmarkNotice}
+            </p>
+          ) : null}
 
           {/* Loading and failure states replace controls that cannot be trusted yet. */}
           {isLoading ? (
@@ -351,7 +430,7 @@ export default function ExperimentWorkbench() {
                   title="Select an index"
                 />
 
-                {/* Search is ready for the future index API without fake records. */}
+                {/* Search filters the validated ready-index inventory from FastAPI. */}
                 <div className="relative">
                   <FiSearch
                     aria-hidden="true"
@@ -361,6 +440,7 @@ export default function ExperimentWorkbench() {
                     `}
                   />
                   <input
+                    aria-label="Search prepared indexes"
                     className={`
                       w-full rounded-sm border border-[var(--border-strong)]
                       bg-[var(--page-surface)] py-3 pl-12 pr-4 font-mono text-sm outline-none
@@ -374,35 +454,96 @@ export default function ExperimentWorkbench() {
                   />
                 </div>
 
-                {/* The empty state directs users to preparation until APIs exist. */}
-                <div
-                  className={`
-                    mt-3 flex flex-col gap-4 border border-dashed
-                    border-[var(--border-strong)] bg-[var(--page-surface)] p-4
-                    sm:flex-row sm:items-center sm:justify-between
-                  `}
-                >
-                  <div className="flex items-start gap-3">
-                    <FiDatabase
-                      aria-hidden="true"
-                      className="mt-0.5 size-5 shrink-0 text-[var(--tone-black)]"
-                    />
-                    <div>
-                      <p className="text-sm font-semibold">
-                        Index inventory is not connected yet
-                      </p>
-                      <p className="mt-1 text-xs leading-5 text-[var(--muted-text)]">
-                        Index selection needs the upcoming backend API.
-                      </p>
-                    </div>
-                  </div>
-                  <Link
-                    className="shrink-0 text-xs font-semibold underline underline-offset-4"
-                    href="/indexes"
+                {/* Selection rows expose labels plus IDs and creation time for duplicates. */}
+                {filteredPreparedIndexes.length > 0 ? (
+                  <div
+                    className="mt-3 divide-y divide-[var(--border-subtle)] border \
+                      border-[var(--border-strong)]"
                   >
-                    Open indexes
-                  </Link>
-                </div>
+                    {filteredPreparedIndexes.map((preparedIndex) => {
+                      const isSelected = preparedIndex.id === selectedIndexId;
+
+                      return (
+                        <button
+                          aria-pressed={isSelected}
+                          className={`grid w-full gap-3 px-4 py-4 text-left \
+                            transition-colors sm:grid-cols-[minmax(0,1fr)_auto] \
+                            sm:items-center ${
+                            isSelected
+                              ? "bg-[var(--charcoal)] text-white"
+                              : "bg-white hover:bg-[var(--hover-surface)]"
+                          }`}
+                          key={preparedIndex.id}
+                          onClick={() => {
+                            setSelectedIndexId(preparedIndex.id);
+                            setBenchmarkNotice(null);
+                          }}
+                          type="button"
+                        >
+                          <span className="min-w-0">
+                            <span className="block truncate text-sm font-semibold">
+                              {preparedIndex.name}
+                            </span>
+                            <span
+                              className={`mt-1 block font-mono text-[10px] ${
+                                isSelected
+                                  ? "text-white/70"
+                                  : "text-[var(--muted-text)]"
+                              }`}
+                            >
+                              Prepared {formatIndexTimestamp(preparedIndex.created_at)}
+                            </span>
+                          </span>
+                          <span
+                            className={`font-mono text-[10px] ${
+                              isSelected
+                                ? "text-white/70"
+                                : "text-[var(--muted-text)]"
+                            }`}
+                          >
+                            Index {preparedIndex.id.slice(0, INDEX_ID_DISPLAY_LENGTH)}
+                            {preparedIndex.embedding.vector_index_id
+                              ? ` · Vector ${preparedIndex.embedding.vector_index_id.slice(
+                                  0,
+                                  INDEX_ID_DISPLAY_LENGTH,
+                                )}`
+                              : ""}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div
+                    className="mt-3 flex flex-col gap-4 border border-dashed \
+                      border-[var(--border-strong)] bg-[var(--page-surface)] p-4 \
+                      sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="flex items-start gap-3">
+                      <FiDatabase
+                        aria-hidden="true"
+                        className="mt-0.5 size-5 shrink-0 text-[var(--tone-black)]"
+                      />
+                      <div>
+                        <p className="text-sm font-semibold">
+                          {preparedIndexes.length > 0
+                            ? "No matching ready indexes"
+                            : "No ready indexes yet"}
+                        </p>
+                        <p className="mt-1 text-xs leading-5 text-[var(--muted-text)]">
+                          Prepare an index through chunking and embedding before selection.
+                        </p>
+                      </div>
+                    </div>
+                    <Link
+                      className="shrink-0 text-xs font-semibold underline \
+                        underline-offset-4"
+                      href="/indexes"
+                    >
+                      Open indexes
+                    </Link>
+                  </div>
+                )}
               </section>
 
               {/* Retrieval controls determine how much evidence enters each prompt. */}

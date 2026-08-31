@@ -1,5 +1,23 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Backend connection
+
+Set `NEXT_PUBLIC_API_BASE_URL` to the FastAPI origin before starting Next.js:
+
+```bash
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000 npm run dev
+```
+
+The `/indexes` page uses the backend to create, list, and poll named prepared
+indexes. Pending and running preparations refresh automatically until they are
+ready or failed. The `/experiments` page requests only ready indexes and uses
+the stable prepared-index ID for selection; duplicate display names are
+distinguished using creation time and shortened prepared/vector artifact IDs.
+
+Benchmark submission is still intentionally disconnected. Retrieval,
+generation, evaluation, and dataset values remain a frontend draft until the
+benchmark API is implemented.
+
 ## Getting Started
 
 First, run the development server:
