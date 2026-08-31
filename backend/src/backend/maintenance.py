@@ -12,6 +12,7 @@ DATABASE_DELETE_ORDER = (
     "retrieved_chunk",
     "retrieval_result",
     "pipeline_run",
+    "prepared_index",
     "vector_index",
     "chunk",
     "chunk_set",

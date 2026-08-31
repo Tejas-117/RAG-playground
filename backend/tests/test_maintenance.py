@@ -53,3 +53,26 @@ def test_generation_rows_are_deleted_before_retrieval_and_runs() -> None:
     assert DATABASE_DELETE_ORDER.index("generation_result") < (
         DATABASE_DELETE_ORDER.index("pipeline_run")
     )
+
+
+def test_prepared_indexes_are_deleted_before_their_reusable_artifacts() -> None:
+    """Verify reset removes prepared-index references before their targets.
+
+    Args:
+        None.
+
+    Returns:
+        None. Assertions verify prepared-index foreign keys are ordered safely.
+    """
+    # Prepared indexes may reference both reusable artifact types after a build.
+    assert DATABASE_DELETE_ORDER.index("prepared_index") < (
+        DATABASE_DELETE_ORDER.index("vector_index")
+    )
+    assert DATABASE_DELETE_ORDER.index("prepared_index") < (
+        DATABASE_DELETE_ORDER.index("chunk_set")
+    )
+
+    # Every prepared index belongs to a corpus, including pending and failed builds.
+    assert DATABASE_DELETE_ORDER.index("prepared_index") < (
+        DATABASE_DELETE_ORDER.index("corpus")
+    )

@@ -50,6 +50,7 @@ def reset_testing_data(response: Response) -> dict[str, Any]:
         # Clear relational data after its external vector collections are gone.
         deleted_database_rows = clear_database_data()
     except sqlite3.Error as error:
+        print(error)
         # Return a stable error code without exposing SQLite details.
         raise HTTPException(
             status_code=500,
