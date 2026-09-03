@@ -259,6 +259,53 @@ CREATE INDEX IF NOT EXISTS idx_prepared_index_vector_index_id
 CREATE INDEX IF NOT EXISTS idx_prepared_index_queue
     ON prepared_index (status, created_at);
 
+-- One immutable user-imported evaluation dataset scoped to one corpus. The
+-- source hash identifies the exact uploaded JSON without retaining that file.
+CREATE TABLE IF NOT EXISTS evaluation_dataset (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL CHECK (
+        length(trim(name)) > 0 AND length(name) <= 100
+    ),
+    corpus_id TEXT NOT NULL REFERENCES corpus(id) ON DELETE RESTRICT,
+    source_filename TEXT NOT NULL CHECK (length(trim(source_filename)) > 0),
+    source_sha256 TEXT NOT NULL CHECK (length(source_sha256) = 64),
+    import_warnings_json TEXT NOT NULL DEFAULT '[]' CHECK (
+        json_valid(import_warnings_json)
+        AND json_type(import_warnings_json) = 'array'
+    ),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_evaluation_dataset_corpus_id
+    ON evaluation_dataset (corpus_id);
+
+-- One stable, ordered evaluation input. Reference answers are optional because
+-- retrieval-only datasets and answer-relevance evaluation do not require them.
+CREATE TABLE IF NOT EXISTS evaluation_example (
+    id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL
+        REFERENCES evaluation_dataset(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    question TEXT NOT NULL CHECK (length(trim(question)) > 0),
+    reference_answer TEXT,
+    UNIQUE (dataset_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_evaluation_example_dataset_id
+    ON evaluation_example (dataset_id);
+
+-- Resolved relevance labels use stable document IDs. Unknown or ambiguous
+-- imported filenames are retained as dataset warnings instead of relationships.
+CREATE TABLE IF NOT EXISTS evaluation_example_relevant_document (
+    example_id TEXT NOT NULL
+        REFERENCES evaluation_example(id) ON DELETE CASCADE,
+    document_id TEXT NOT NULL REFERENCES document(id) ON DELETE RESTRICT,
+    PRIMARY KEY (example_id, document_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_evaluation_relevant_document_id
+    ON evaluation_example_relevant_document (document_id);
+
 -- One immutable pipeline execution, including its resolved configuration,
 -- lifecycle, reusable chunk artifact, timing, and structured failure state.
 CREATE TABLE IF NOT EXISTS pipeline_run (

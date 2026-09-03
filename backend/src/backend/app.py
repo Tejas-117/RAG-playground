@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routers import (
     corpora,
+    datasets,
     indexes,
     pipeline_options,
     runs,
@@ -56,7 +57,7 @@ app = FastAPI(title="RAG Playground API", lifespan=application_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -64,6 +65,7 @@ app.include_router(uploads.router)
 app.include_router(corpora.router)
 app.include_router(pipeline_options.router)
 app.include_router(indexes.router)
+app.include_router(datasets.router)
 app.include_router(runs.router)
 app.include_router(testing.router)
 

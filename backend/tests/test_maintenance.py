@@ -76,3 +76,29 @@ def test_prepared_indexes_are_deleted_before_their_reusable_artifacts() -> None:
     assert DATABASE_DELETE_ORDER.index("prepared_index") < (
         DATABASE_DELETE_ORDER.index("corpus")
     )
+
+
+def test_evaluation_datasets_are_deleted_in_foreign_key_order() -> None:
+    """Verify reset removes relevance links and examples before dataset parents.
+
+    Args:
+        None.
+
+    Returns:
+        None. Assertions verify every evaluation-dataset dependency is safe.
+    """
+    # Relevance links depend on both their owning example and a source document.
+    assert DATABASE_DELETE_ORDER.index(
+        "evaluation_example_relevant_document"
+    ) < DATABASE_DELETE_ORDER.index("evaluation_example")
+    assert DATABASE_DELETE_ORDER.index(
+        "evaluation_example_relevant_document"
+    ) < DATABASE_DELETE_ORDER.index("document")
+
+    # Examples cascade from datasets, while datasets themselves belong to corpora.
+    assert DATABASE_DELETE_ORDER.index("evaluation_example") < (
+        DATABASE_DELETE_ORDER.index("evaluation_dataset")
+    )
+    assert DATABASE_DELETE_ORDER.index("evaluation_dataset") < (
+        DATABASE_DELETE_ORDER.index("corpus")
+    )

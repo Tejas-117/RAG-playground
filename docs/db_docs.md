@@ -110,7 +110,9 @@ remain in the named Chroma collection.
 
 Represents one immutable single-question run submitted from the experiment
 workbench. The current background pipeline executes chunking, embedding,
-retrieval, and generation; evaluation remains unimplemented.
+retrieval, and generation. Evaluation execution remains unimplemented, while
+immutable evaluation datasets and their resolved document labels are now
+persisted independently for later benchmark reuse.
 
 | Field | Description |
 | --- | --- |

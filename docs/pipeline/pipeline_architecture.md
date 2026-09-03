@@ -332,9 +332,12 @@ single-question run may select groundedness and answer relevance together, but
 cannot select retrieval metrics or answer correctness because it has no labelled
 relevant documents or reference answer.
 
-Evaluation datasets remain separate and are not represented in the current run
-schema. When they are implemented, they will use stable evaluation-example
-records rather than overloading the single `question` field.
+Evaluation datasets remain separate from the current single-question run
+schema. Imported datasets now use stable dataset and evaluation-example records
+rather than overloading `pipeline_run.question`. Document filenames supplied by
+an import are resolved once to stable document IDs; missing or ambiguous names
+are retained as warnings. Future benchmark runs will reference these immutable
+dataset and example IDs.
 
 ### Fingerprint-based reuse
 
