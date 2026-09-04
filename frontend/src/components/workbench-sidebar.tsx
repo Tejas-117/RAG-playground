@@ -13,7 +13,7 @@ const navigationItems = [
   { label: "Indexes", icon: FiDatabase, href: "/indexes" },
   { label: "Experiments", icon: FiPieChart, href: "/experiments" },
   { label: "Runs", icon: FiGrid, href: "#" },
-  { label: "Datasets", icon: FiTable, href: "#" },
+  { label: "Datasets", icon: FiTable, href: "/datasets" },
 ];
 
 type WorkbenchSidebarProps = {

@@ -225,6 +225,60 @@ button {
   pointer-events: none;
 }
 
+/* The full-viewport dialog centers its import workspace within the native top layer. */
+.dataset-modal {
+  width: 100vw;
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+/* An open import dialog uses the entire viewport as a reliable centering canvas. */
+.dataset-modal[open] {
+  display: grid;
+  place-items: center;
+}
+
+/* Import remains visually connected to the workbench beneath a restrained blur. */
+.dataset-modal::backdrop,
+.dataset-inspector-dialog::backdrop {
+  background: rgb(22 25 31 / 52%);
+  backdrop-filter: blur(6px) saturate(80%);
+  animation: run-modal-backdrop-in 180ms ease-out both;
+}
+
+/* The import shell enters as one artifact-registration workspace. */
+.dataset-modal-shell {
+  max-height: calc(100dvh - 2rem);
+  animation: dataset-modal-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* The inspector reserves the viewport so its unused area can dismiss the panel. */
+.dataset-inspector-dialog {
+  width: 100vw;
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+/* The ledger slides from the inventory edge as one deliberate inspection transition. */
+.dataset-inspector-shell {
+  box-shadow: -24px 0 64px rgb(17 20 26 / 22%);
+  animation: dataset-inspector-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 /* The index builder enters as one workspace when requested from an existing inventory. */
 .index-builder-reveal {
   animation: index-builder-reveal 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
@@ -280,6 +334,26 @@ button {
   }
 }
 
+@keyframes dataset-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes dataset-inspector-in {
+  from {
+    transform: translateX(24px);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .index-builder-reveal {
     animation: none;
@@ -297,6 +371,8 @@ button {
 
 @media (prefers-reduced-motion: reduce) {
   .landing-reveal,
+  .dataset-inspector-shell,
+  .dataset-modal-shell,
   .pipeline-line::after,
   .run-modal-shell,
   .run-status-spinner,
@@ -306,6 +382,11 @@ button {
   }
 
   .run-modal::backdrop {
+    animation: none;
+  }
+
+  .dataset-modal::backdrop,
+  .dataset-inspector-dialog::backdrop {
     animation: none;
   }
 

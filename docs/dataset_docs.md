@@ -69,5 +69,19 @@ leave a partial dataset. Datasets are immutable after import.
   `204`. Once benchmark records reference datasets, protected deletion returns
   `409 dataset_in_use` rather than removing historical inputs.
 
-Benchmark execution, evaluation metric calculation, dataset editing, manual UI
-authoring, and frontend integration are not part of this backend slice.
+## Dataset management UI
+
+The `/datasets` workbench lists imported datasets across corpora. Users can
+search by dataset name, filter by corpus, and import a UTF-8 JSON file using the
+same name, corpus, file type, and size constraints enforced by the API.
+
+Selecting a dataset opens an inspector containing its source provenance,
+ordered questions, optional reference answers, resolved document filenames,
+and document-resolution warnings. Questions without a successfully resolved
+document are labelled as unlabelled for retrieval evaluation rather than being
+removed. Deletion requires confirmation, and datasets protected by benchmark
+history remain visible when the API returns `409 dataset_in_use`.
+
+Datasets remain immutable after import. Benchmark execution, metric
+calculation, dataset editing, manual dataset authoring, and selecting persisted
+datasets from `/experiments` are separate future changes.
