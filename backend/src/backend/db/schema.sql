@@ -467,3 +467,150 @@ CREATE TABLE IF NOT EXISTS generation_context_chunk (
     FOREIGN KEY (retrieval_result_id, retrieval_rank)
         REFERENCES retrieved_chunk(retrieval_result_id, rank) ON DELETE RESTRICT
 );
+
+-- One dataset-wide benchmark launched from a ready named index. The complete
+-- configuration snapshot includes preparation settings resolved from that index.
+CREATE TABLE IF NOT EXISTS benchmark_run (
+    id TEXT PRIMARY KEY,
+    prepared_index_id TEXT NOT NULL
+        REFERENCES prepared_index(id) ON DELETE RESTRICT,
+    dataset_id TEXT NOT NULL
+        REFERENCES evaluation_dataset(id) ON DELETE RESTRICT,
+    corpus_id TEXT NOT NULL REFERENCES corpus(id) ON DELETE RESTRICT,
+    vector_index_id TEXT NOT NULL
+        REFERENCES vector_index(id) ON DELETE RESTRICT,
+    effective_config_json TEXT NOT NULL CHECK (
+        json_valid(effective_config_json)
+        AND json_type(effective_config_json) = 'object'
+    ),
+    status TEXT NOT NULL CHECK (
+        status IN ('pending', 'running', 'completed', 'failed')
+    ),
+    current_stage TEXT CHECK (
+        current_stage IS NULL OR current_stage IN ('retrieval', 'generation')
+    ),
+    current_example_id TEXT REFERENCES evaluation_example(id) ON DELETE RESTRICT,
+    total_examples INTEGER NOT NULL CHECK (total_examples > 0),
+    completed_examples INTEGER NOT NULL DEFAULT 0 CHECK (completed_examples >= 0),
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    duration_ms INTEGER CHECK (duration_ms >= 0),
+    error_code TEXT,
+    error_details_json TEXT CHECK (
+        error_details_json IS NULL OR (
+            json_valid(error_details_json)
+            AND json_type(error_details_json) = 'object'
+        )
+    ),
+    CHECK (completed_examples <= total_examples)
+);
+
+CREATE INDEX IF NOT EXISTS idx_benchmark_run_queue
+    ON benchmark_run (status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_benchmark_run_dataset_id
+    ON benchmark_run (dataset_id);
+
+-- Each dataset example has an independently inspectable execution lifecycle,
+-- while the benchmark remains the single user-visible run.
+CREATE TABLE IF NOT EXISTS benchmark_example_run (
+    id TEXT PRIMARY KEY,
+    benchmark_run_id TEXT NOT NULL
+        REFERENCES benchmark_run(id) ON DELETE CASCADE,
+    evaluation_example_id TEXT NOT NULL
+        REFERENCES evaluation_example(id) ON DELETE RESTRICT,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    status TEXT NOT NULL CHECK (
+        status IN ('pending', 'running', 'completed', 'failed')
+    ),
+    current_stage TEXT CHECK (
+        current_stage IS NULL OR current_stage IN ('retrieval', 'generation')
+    ),
+    retrieval_duration_ms INTEGER CHECK (retrieval_duration_ms >= 0),
+    generation_duration_ms INTEGER CHECK (generation_duration_ms >= 0),
+    started_at TEXT,
+    completed_at TEXT,
+    duration_ms INTEGER CHECK (duration_ms >= 0),
+    error_code TEXT,
+    error_details_json TEXT CHECK (
+        error_details_json IS NULL OR (
+            json_valid(error_details_json)
+            AND json_type(error_details_json) = 'object'
+        )
+    ),
+    UNIQUE (benchmark_run_id, evaluation_example_id),
+    UNIQUE (benchmark_run_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_benchmark_example_run_parent
+    ON benchmark_example_run (benchmark_run_id, ordinal);
+
+-- Retrieval output belongs to one example execution and the exact prepared
+-- vector index searched for that question.
+CREATE TABLE IF NOT EXISTS benchmark_retrieval_result (
+    id TEXT PRIMARY KEY,
+    example_run_id TEXT NOT NULL UNIQUE
+        REFERENCES benchmark_example_run(id) ON DELETE CASCADE,
+    vector_index_id TEXT NOT NULL
+        REFERENCES vector_index(id) ON DELETE RESTRICT,
+    requested_top_k INTEGER NOT NULL CHECK (requested_top_k > 0),
+    returned_count INTEGER NOT NULL CHECK (
+        returned_count >= 0 AND returned_count <= requested_top_k
+    ),
+    distance_metric TEXT NOT NULL CHECK (
+        distance_metric IN ('cosine', 'dot_product', 'euclidean')
+    ),
+    duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+    created_at TEXT NOT NULL
+);
+
+-- Ranked benchmark hits retain stable chunk references and unmodified distance.
+CREATE TABLE IF NOT EXISTS benchmark_retrieved_chunk (
+    retrieval_result_id TEXT NOT NULL
+        REFERENCES benchmark_retrieval_result(id) ON DELETE CASCADE,
+    rank INTEGER NOT NULL CHECK (rank > 0),
+    chunk_id TEXT NOT NULL REFERENCES chunk(id) ON DELETE RESTRICT,
+    raw_distance REAL NOT NULL,
+    PRIMARY KEY (retrieval_result_id, rank),
+    UNIQUE (retrieval_result_id, chunk_id)
+);
+
+-- One generated answer is persisted independently for each benchmark example.
+CREATE TABLE IF NOT EXISTS benchmark_generation_result (
+    id TEXT PRIMARY KEY,
+    example_run_id TEXT NOT NULL UNIQUE
+        REFERENCES benchmark_example_run(id) ON DELETE CASCADE,
+    retrieval_result_id TEXT NOT NULL UNIQUE
+        REFERENCES benchmark_retrieval_result(id) ON DELETE RESTRICT,
+    provider TEXT NOT NULL CHECK (length(trim(provider)) > 0),
+    model TEXT NOT NULL CHECK (length(trim(model)) > 0),
+    provider_model TEXT,
+    prompt_template_version TEXT NOT NULL,
+    provider_policy_version TEXT NOT NULL,
+    generation_config_json TEXT NOT NULL CHECK (json_valid(generation_config_json)),
+    answer_text TEXT NOT NULL CHECK (length(trim(answer_text)) > 0),
+    finish_reason TEXT NOT NULL CHECK (length(trim(finish_reason)) > 0),
+    prompt_tokens INTEGER CHECK (prompt_tokens >= 0),
+    completion_tokens INTEGER CHECK (completion_tokens >= 0),
+    total_tokens INTEGER CHECK (total_tokens >= 0),
+    provider_request_id TEXT,
+    system_fingerprint TEXT,
+    provider_called INTEGER NOT NULL CHECK (provider_called IN (0, 1)),
+    duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+    created_at TEXT NOT NULL
+);
+
+-- Prompt context records the exact retrieval-rank prefix consumed by generation.
+CREATE TABLE IF NOT EXISTS benchmark_generation_context_chunk (
+    generation_result_id TEXT NOT NULL
+        REFERENCES benchmark_generation_result(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+    retrieval_result_id TEXT NOT NULL,
+    retrieval_rank INTEGER NOT NULL CHECK (retrieval_rank > 0),
+    PRIMARY KEY (generation_result_id, ordinal),
+    UNIQUE (generation_result_id, retrieval_rank),
+    FOREIGN KEY (retrieval_result_id, retrieval_rank)
+        REFERENCES benchmark_retrieved_chunk(retrieval_result_id, rank)
+        ON DELETE RESTRICT
+);

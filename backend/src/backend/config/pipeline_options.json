@@ -90,11 +90,19 @@
             }
           },
           {
-            "value": "llama-3.2-3b-preview",
-            "label": "Llama 3.2 3B Preview",
+            "value": "qwen/qwen3.6-27b",
+            "label": "Qwen 3.6 27B",
             "capabilities": {
-              "context_window_tokens": 128000,
-              "max_output_tokens": 8000
+              "context_window_tokens": 131072,
+              "max_output_tokens": 16384
+            }
+          },
+          {
+            "value": "qwen/qwen3.8-27b",
+            "label": "Qwen 3.8 27B",
+            "capabilities": {
+              "context_window_tokens": 131042,
+              "max_output_tokens": 16384
             }
           }
         ]

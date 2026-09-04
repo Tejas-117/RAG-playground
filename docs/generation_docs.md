@@ -13,7 +13,8 @@ The backend exposes these Groq models:
 | --- | ---: | ---: | --- |
 | `openai/gpt-oss-20b` | 131,072 | 65,536 | Default production model. |
 | `openai/gpt-oss-120b` | 131,072 | 65,536 | Larger production model. |
-| `llama-3.2-3b-preview` | 128,000 | 8,000 | Preview availability may change. |
+| `qwen/qwen3.6-27b` | 131,072 | 16,384 | Active Groq-hosted Qwen model. |
+| `qwen/qwen3.8-27b` | 131,042 | 16,384 | Active Groq-hosted Qwen model. |
 
 Create the ignored file `backend/.env` locally:
 

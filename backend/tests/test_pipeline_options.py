@@ -12,8 +12,8 @@ from backend.api.routers import pipeline_options
 from backend.app import app
 
 
-def test_pipeline_options_expose_requested_generation_models() -> None:
-    """Verify the MVP catalog contains the requested Groq generation models.
+def test_pipeline_options_expose_supported_generation_models() -> None:
+    """Verify the catalog contains the currently supported Groq generation models.
 
     Args:
         None. The test reads the version-controlled backend catalog.
@@ -45,7 +45,8 @@ def test_pipeline_options_expose_requested_generation_models() -> None:
     assert [model["value"] for model in generation_provider["models"]] == [
         "openai/gpt-oss-20b",
         "openai/gpt-oss-120b",
-        "llama-3.2-3b-preview",
+        "qwen/qwen3.6-27b",
+        "qwen/qwen3.8-27b",
     ]
     assert generation_provider["models"][0]["capabilities"] == {
         "context_window_tokens": 131072,

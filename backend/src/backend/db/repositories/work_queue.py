@@ -14,7 +14,7 @@ class ClaimedWorkItem(TypedDict):
         id: Stable identifier of the claimed persistence record.
     """
 
-    kind: Literal["prepared_index", "pipeline_run"]
+    kind: Literal["benchmark_run", "prepared_index", "pipeline_run"]
     id: str
 
 
@@ -63,6 +63,9 @@ def claim_next_pending_work_item() -> ClaimedWorkItem | None:
                 UNION ALL
                 SELECT id, 'pipeline_run' AS kind, created_at
                 FROM pipeline_run WHERE status = 'pending'
+                UNION ALL
+                SELECT id, 'benchmark_run' AS kind, created_at
+                FROM benchmark_run WHERE status = 'pending'
             )
             ORDER BY created_at, kind, id
             LIMIT 1
@@ -73,7 +76,7 @@ def claim_next_pending_work_item() -> ClaimedWorkItem | None:
         if row is None:
             return None
 
-        # Each job type starts in chunking but has an independent lifecycle table.
+        # Preparation and legacy runs begin in chunking; benchmarks begin at retrieval.
         if row["kind"] == "prepared_index":
             cursor = connection.execute(
                 """
@@ -83,11 +86,20 @@ def claim_next_pending_work_item() -> ClaimedWorkItem | None:
                 """,
                 (started_at, row["id"]),
             )
-        else:
+        elif row["kind"] == "pipeline_run":
             cursor = connection.execute(
                 """
                 UPDATE pipeline_run
                 SET status = 'running', current_stage = 'chunking', started_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (started_at, row["id"]),
+            )
+        else:
+            cursor = connection.execute(
+                """
+                UPDATE benchmark_run
+                SET status = 'running', current_stage = 'retrieval', started_at = ?
                 WHERE id = ? AND status = 'pending'
                 """,
                 (started_at, row["id"]),

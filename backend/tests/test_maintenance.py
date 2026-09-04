@@ -3,6 +3,29 @@
 from backend.maintenance import DATABASE_DELETE_ORDER
 
 
+def test_benchmark_rows_are_deleted_before_selected_inputs() -> None:
+    """Verify benchmark dependencies are cleared before datasets and indexes.
+
+    Returns:
+        None. Assertions cover every benchmark parent and selected artifact.
+    """
+    # Child results must be removed before their example-execution parent.
+    assert DATABASE_DELETE_ORDER.index("benchmark_generation_result") < (
+        DATABASE_DELETE_ORDER.index("benchmark_example_run")
+    )
+    assert DATABASE_DELETE_ORDER.index("benchmark_retrieval_result") < (
+        DATABASE_DELETE_ORDER.index("benchmark_example_run")
+    )
+
+    # The user-visible run protects both immutable selected resources.
+    assert DATABASE_DELETE_ORDER.index("benchmark_run") < (
+        DATABASE_DELETE_ORDER.index("evaluation_dataset")
+    )
+    assert DATABASE_DELETE_ORDER.index("benchmark_run") < (
+        DATABASE_DELETE_ORDER.index("prepared_index")
+    )
+
+
 def test_retrieval_rows_are_deleted_before_their_parent_artifacts() -> None:
     """Verify reset removes ranked results before runs, indexes, and chunks.
 

@@ -16,13 +16,17 @@ import NumberControl from "@/components/number-control";
 import SelectControl from "@/components/select-control";
 import WorkbenchGridCanvas from "@/components/workbench-grid-canvas";
 import WorkbenchSidebar from "@/components/workbench-sidebar";
-import apiClient, { isCancel } from "@/lib/axios";
+import apiClient, { isAxiosError, isCancel } from "@/lib/axios";
+import { createBenchmarkRun } from "@/lib/benchmark-run-api";
+import { listDatasets } from "@/lib/dataset-api";
 import { listPreparedIndexes } from "@/lib/prepared-index-api";
 import {
   type PipelineOptions,
   parsePipelineOptions,
 } from "@/validation/pipeline-options";
 import { type PreparedIndex } from "@/validation/prepared-indexes";
+import { parseBenchmarkRunApiError } from "@/validation/benchmark-runs";
+import { type DatasetSummary } from "@/validation/datasets";
 
 /** The default prompt remains local until the benchmark API accepts prompt templates. */
 const DEFAULT_SYSTEM_PROMPT =
@@ -157,8 +161,11 @@ export default function ExperimentWorkbench() {
   // Stores the stable prepared-index identity selected for this benchmark draft.
   const [selectedIndexId, setSelectedIndexId] = useState("");
 
-  // Stores the local evaluation dataset selected for the benchmark.
-  const [datasetFile, setDatasetFile] = useState<File | null>(null);
+  // Stores immutable evaluation datasets available for benchmark selection.
+  const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
+
+  // Stores the stable imported dataset identity selected for this benchmark.
+  const [selectedDatasetId, setSelectedDatasetId] = useState("");
 
   // Indicates that pipeline options and ready indexes are being requested.
   const [isLoading, setIsLoading] = useState(true);
@@ -171,6 +178,9 @@ export default function ExperimentWorkbench() {
 
   // Explains that benchmark submission remains deferred after inputs are complete.
   const [benchmarkNotice, setBenchmarkNotice] = useState<string | null>(null);
+
+  // Prevents duplicate benchmark submissions while FastAPI enqueues the run.
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Gives the run action direct access to the first incomplete field.
   const indexSearchInputRef = useRef<HTMLInputElement | null>(null);
@@ -189,21 +199,28 @@ export default function ExperimentWorkbench() {
       setLoadError(null);
 
       try {
-        const [optionsResponse, indexes] = await Promise.all([
+        const [optionsResponse, indexes, loadedDatasets] = await Promise.all([
           apiClient.get<unknown>("/pipeline/options", {
             signal: abortController.signal,
           }),
           listPreparedIndexes("ready", abortController.signal),
+          listDatasets({}, abortController.signal),
         ]);
         const validatedOptions = parsePipelineOptions(optionsResponse.data);
 
         setPipelineOptions(validatedOptions);
         setConfiguration(createDefaultConfiguration(validatedOptions));
         setPreparedIndexes(indexes);
+        setDatasets(loadedDatasets);
 
         // Preserve selection only while the ready inventory still contains it.
         setSelectedIndexId((current) =>
           indexes.some((index) => index.id === current) ? current : "",
+        );
+
+        // Preserve dataset selection only while the immutable record still exists.
+        setSelectedDatasetId((current) =>
+          loadedDatasets.some((dataset) => dataset.id === current) ? current : "",
         );
       } catch (error) {
         // Cancellation is expected when the user leaves while the request is active.
@@ -214,6 +231,7 @@ export default function ExperimentWorkbench() {
         setPipelineOptions(null);
         setConfiguration(null);
         setPreparedIndexes([]);
+        setDatasets([]);
         setLoadError(
           error instanceof Error
             ? error.message
@@ -244,6 +262,16 @@ export default function ExperimentWorkbench() {
     (index) => index.id === selectedIndexId,
   );
 
+  // Resolve the selected dataset for lineage display and compatibility filtering.
+  const selectedDataset = datasets.find(
+    (dataset) => dataset.id === selectedDatasetId,
+  );
+
+  // Only datasets from the selected index corpus are valid benchmark inputs.
+  const compatibleDatasets = selectedIndex
+    ? datasets.filter((dataset) => dataset.corpus_id === selectedIndex.corpus_id)
+    : [];
+
   // Search ready names and stable artifact identities entirely within loaded data.
   const normalizedIndexSearch = indexSearch.trim().toLocaleLowerCase();
   const filteredPreparedIndexes = preparedIndexes.filter((index) => {
@@ -260,7 +288,12 @@ export default function ExperimentWorkbench() {
 
   // A benchmark needs both a reusable index and an evaluation dataset.
   const canRunExperiment = Boolean(
-    selectedIndexId && datasetFile && configuration && !isLoading && !loadError,
+    selectedIndexId &&
+      selectedDatasetId &&
+      configuration &&
+      !isLoading &&
+      !isSubmitting &&
+      !loadError,
   );
 
   /**
@@ -268,7 +301,7 @@ export default function ExperimentWorkbench() {
    *
    * @returns Nothing. The missing prepared-index field receives keyboard focus.
    */
-  function handleRunExperiment(): void {
+  async function handleRunExperiment(): Promise<void> {
     setBenchmarkNotice(null);
 
     // Focus the now-connected prepared-index inventory when selection is missing.
@@ -281,10 +314,50 @@ export default function ExperimentWorkbench() {
       return;
     }
 
-    // Benchmark persistence is intentionally outside the prepared-index API scope.
-    setBenchmarkNotice(
-      "This benchmark configuration is ready. Benchmark creation is not connected yet.",
-    );
+    // Defensive guards keep incomplete UI state out of the validated API boundary.
+    if (!selectedDatasetId || !configuration) {
+      setBenchmarkNotice("Select a compatible evaluation dataset before launching.");
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      const benchmark = await createBenchmarkRun({
+        prepared_index_id: selectedIndexId,
+        dataset_id: selectedDatasetId,
+        configuration: {
+          retrieval: { top_k: Number(configuration.topK) },
+          generation: {
+            provider: configuration.generationProvider,
+            model: configuration.generationModel,
+            temperature: Number(configuration.temperature),
+            max_output_tokens: Number(configuration.maxOutputTokens),
+          },
+          evaluation: {
+            retrieval_metrics: configuration.retrievalMetrics,
+            answer_metrics: configuration.answerMetrics,
+          },
+        },
+      });
+      setBenchmarkNotice(
+        `Benchmark ${benchmark.id.slice(0, 8)} was queued with ` +
+          `${benchmark.total_examples} questions.`,
+      );
+    } catch (error) {
+      // Prefer the structured backend explanation for lineage or config failures.
+      const apiMessage = isAxiosError(error)
+        ? parseBenchmarkRunApiError(error.response?.data)
+        : null;
+      setBenchmarkNotice(
+        apiMessage ??
+          (error instanceof Error
+            ? error.message
+            : "The benchmark could not be launched."),
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -322,7 +395,7 @@ export default function ExperimentWorkbench() {
               disabled:cursor-not-allowed disabled:opacity-40
             `}
             disabled={!canRunExperiment}
-            onClick={handleRunExperiment}
+            onClick={() => void handleRunExperiment()}
             title={
               canRunExperiment
                 ? "Run experiment"
@@ -331,7 +404,7 @@ export default function ExperimentWorkbench() {
             type="button"
           >
             <FiPlay aria-hidden="true" className="size-4" />
-            Run experiment
+            {isSubmitting ? "Queueing…" : "Run experiment"}
           </button>
         </header>
 
@@ -346,7 +419,7 @@ export default function ExperimentWorkbench() {
               ["Index", selectedIndex?.name ?? "Required"],
               ["Retrieve", configuration ? `Top ${configuration.topK}` : "Loading"],
               ["Generate", generationProvider?.label ?? "Loading"],
-              ["Dataset", datasetFile?.name ?? "Required"],
+              ["Dataset", selectedDataset?.name ?? "Required"],
             ].map(([label, value], index) => (
               <div
                 className={`relative min-w-0 px-4 py-3 ${
@@ -476,6 +549,15 @@ export default function ExperimentWorkbench() {
                           key={preparedIndex.id}
                           onClick={() => {
                             setSelectedIndexId(preparedIndex.id);
+
+                            // A new corpus invalidates any dataset selected previously.
+                            if (
+                              selectedDataset &&
+                              selectedDataset.corpus_id !== preparedIndex.corpus_id
+                            ) {
+                              setSelectedDatasetId("");
+                            }
+
                             setBenchmarkNotice(null);
                           }}
                           type="button"
@@ -762,47 +844,59 @@ export default function ExperimentWorkbench() {
                     </span>
                     <span className="sr-only"> (required)</span>
                   </span>
-                  <span
-                    className={`
-                      mt-2 flex cursor-pointer flex-col gap-4 border border-dashed
-                      border-[var(--border-strong)] bg-[var(--page-surface)] p-5
-                      hover:border-[var(--charcoal)] focus-within:ring-2
-                      focus-within:ring-[var(--charcoal)] sm:flex-row sm:items-center
-                      sm:justify-between
-                    `}
-                  >
-                    <span className="flex min-w-0 items-start gap-3">
-                      <FiFileText
-                        aria-hidden="true"
-                        className="mt-0.5 size-5 shrink-0 text-[var(--tone-black)]"
-                      />
-                      <span className="min-w-0">
-                        <span className="block truncate text-sm font-semibold">
-                          {datasetFile?.name ?? "Choose an evaluation dataset"}
-                        </span>
-                        <span className="mt-1 block text-xs text-[var(--muted-text)]">
-                          Include questions and annotations required by selected metrics.
-                        </span>
-                      </span>
-                    </span>
-                    <span
-                      className={`
-                        w-fit shrink-0 border border-[var(--border-strong)] bg-white
-                        px-4 py-2 text-xs font-semibold
-                      `}
-                    >
-                      Browse
-                    </span>
-                    <input
-                      accept=".csv,.json,.jsonl"
-                      className="sr-only"
-                      id="experiment-dataset"
-                      onChange={(event) => setDatasetFile(event.target.files?.[0] ?? null)}
-                      required
-                      type="file"
+                  {/* Saved dataset selection preserves stable example and label IDs. */}
+                  <span className="relative mt-2 block">
+                    <FiFileText
+                      aria-hidden="true"
+                      className="pointer-events-none absolute left-4 top-1/2 size-5
+                        -translate-y-1/2 text-[var(--tone-black)]"
                     />
+                    <select
+                      className="min-h-14 w-full appearance-none border
+                        border-[var(--border-strong)] bg-[var(--page-surface)] py-3
+                        pl-12 pr-10 text-sm font-semibold outline-none
+                        focus:border-[var(--charcoal)] focus:ring-1
+                        focus:ring-[var(--charcoal)] disabled:cursor-not-allowed
+                        disabled:opacity-50"
+                      disabled={!selectedIndex || compatibleDatasets.length === 0}
+                      id="experiment-dataset"
+                      onChange={(event) => {
+                        setSelectedDatasetId(event.target.value);
+                        setBenchmarkNotice(null);
+                      }}
+                      required
+                      value={selectedDatasetId}
+                    >
+                      <option value="">
+                        {selectedIndex
+                          ? "Select a saved evaluation dataset"
+                          : "Select an index first"}
+                      </option>
+
+                      {/* Options are limited to the selected index's immutable corpus. */}
+                      {compatibleDatasets.map((dataset) => (
+                        <option key={dataset.id} value={dataset.id}>
+                          {dataset.name} · {dataset.example_count} questions
+                        </option>
+                      ))}
+                    </select>
                   </span>
                 </label>
+
+                {/* Empty corpus-specific inventory links to dataset management. */}
+                {selectedIndex && compatibleDatasets.length === 0 ? (
+                  <p className="mt-3 text-xs leading-5 text-[var(--muted-text)]">
+                    No saved dataset belongs to this index&apos;s corpus. Import one in
+                    <Link
+                      className="ml-1 font-semibold text-[var(--charcoal)] underline
+                        underline-offset-4"
+                      href="/datasets"
+                    >
+                      Datasets
+                    </Link>
+                    .
+                  </p>
+                ) : null}
               </section>
             </form>
           ) : null}

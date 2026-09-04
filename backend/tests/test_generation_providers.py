@@ -132,8 +132,8 @@ def test_groq_provider_sends_non_streaming_gpt_oss_request() -> None:
     assert result.provider_request_id == "request-1"
 
 
-def test_groq_provider_does_not_send_reasoning_options_to_llama() -> None:
-    """Verify GPT-OSS-only fields are excluded from Llama requests.
+def test_groq_provider_does_not_send_gpt_oss_options_to_qwen() -> None:
+    """Verify GPT-OSS-only fields are excluded from Qwen requests.
 
     Args:
         None.
@@ -145,7 +145,7 @@ def test_groq_provider_does_not_send_reasoning_options_to_llama() -> None:
     provider = GroqGenerationProvider(client=client)
 
     provider.generate(
-        "llama-3.2-3b-preview",
+        "qwen/qwen3.6-27b",
         (GenerationMessage(role="user", content="Question"),),
         0.2,
         100,

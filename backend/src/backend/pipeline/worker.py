@@ -5,6 +5,10 @@ import logging
 from collections.abc import Callable
 
 from backend.db.repositories.work_queue import claim_next_pending_work_item
+from backend.pipeline.benchmark_execution import (
+    BenchmarkExecutor,
+    get_benchmark_executor,
+)
 from backend.pipeline.execution import (
     PipelineExecutor,
     PipelineRunExecutionError,
@@ -32,18 +36,23 @@ class PipelineRunWorker:
         prepared_index_executor_factory: Callable[[], PreparedIndexExecutor] = (
             get_prepared_index_executor
         ),
+        benchmark_executor_factory: Callable[[], BenchmarkExecutor] = (
+            get_benchmark_executor
+        ),
     ) -> None:
         """Configure the stateless executor factory used for each claimed run.
 
         Args:
             executor_factory: Callable returning a full-run executor.
             prepared_index_executor_factory: Callable returning a preparation executor.
+            benchmark_executor_factory: Callable returning a dataset benchmark executor.
 
         Returns:
             None. Queue and run state remain in SQLite.
         """
         self._executor_factory = executor_factory
         self._prepared_index_executor_factory = prepared_index_executor_factory
+        self._benchmark_executor_factory = benchmark_executor_factory
 
     async def run_forever(self) -> None:
         """Poll the persisted queue until the application cancels the worker.
@@ -78,6 +87,8 @@ class PipelineRunWorker:
                 # Route the claimed durable row to its independently testable executor.
                 if work_kind == "prepared_index":
                     executor = self._prepared_index_executor_factory()
+                elif work_kind == "benchmark_run":
+                    executor = self._benchmark_executor_factory()
                 else:
                     executor = self._executor_factory()
 

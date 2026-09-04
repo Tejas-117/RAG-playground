@@ -29,9 +29,10 @@ Immutable corpus
   -> build or reuse vector index
 ```
 
-An experiment later selects a ready prepared-index ID and executes query-specific
-retrieval, generation, and evaluation. The existing single-question `/runs` flow
-still executes the complete legacy pipeline until benchmark runs replace it:
+An experiment later selects a ready prepared-index ID and a saved evaluation
+dataset, then executes query-specific retrieval and generation. Evaluation remains
+a separate later stage over persisted outputs. New `POST /runs` benchmark requests
+reuse the prepared index and do not repeat parsing, chunking, or embedding:
 
 ```text
 Immutable corpus
@@ -310,21 +311,21 @@ It may be saved and named, such as “Baseline Recursive”.
 
 A run records the exact effective configuration used for an execution. Named editable configurations are useful for UX, but they are not necessary for cache correctness; caching uses the effective configuration snapshot and stage fingerprints.
 
-The first backend run slice supports a single ad hoc question. `POST /runs`
-validates the selected immutable corpus and backend-supported configuration,
-persists a pending immutable run, and returns `202`. The application-owned local
-worker claims queued runs and uses `PipelineExecutor` to execute chunking,
-embedding, query-specific retrieval, and answer generation. The executor links the ready
-chunk set and vector index directly from `pipeline_run`, records whether each
-artifact was reused, then saves ranked chunk references and the generated answer.
+The benchmark run slice accepts a ready `prepared_index_id`, an immutable
+`dataset_id`, and query-time retrieval, generation, and evaluation settings.
+`POST /runs` verifies that the index and dataset share a corpus, resolves the
+preparation configuration from the index, saves the complete effective snapshot,
+creates ordered child executions for every dataset example, and returns `202`.
+The local worker executes those children sequentially through retrieval and
+generation against the exact prepared vector index.
 
 Runs progress through `pending`, `running`, and either `completed` or `failed`.
-At this implementation stage, `completed` means every currently executable
-stage—chunking, embedding, retrieval, and generation—finished successfully.
-`current_stage` identifies active work, and `GET /runs/{run_id}` provides the
-stable polling resource.
-Failed runs retain safe structured errors and timing, while invalid requests
-rejected before enqueueing create no run.
+At this implementation stage, `completed` means retrieval and generation finished
+for every dataset example. `current_stage`, `current_example_id`, and completed
+counts expose progress without inventing percentages. `GET /runs` returns compact
+history and `GET /runs/{run_id}` returns question-level rankings and answers.
+If one example fails, earlier completed outputs remain inspectable while the parent
+run and active child receive the same safe structured failure.
 
 The effective configuration includes ordered `retrieval_metrics` and
 `answer_metrics` lists. Both lists may be empty to skip evaluation. A
@@ -332,12 +333,11 @@ single-question run may select groundedness and answer relevance together, but
 cannot select retrieval metrics or answer correctness because it has no labelled
 relevant documents or reference answer.
 
-Evaluation datasets remain separate from the current single-question run
-schema. Imported datasets now use stable dataset and evaluation-example records
-rather than overloading `pipeline_run.question`. Document filenames supplied by
-an import are resolved once to stable document IDs; missing or ambiguous names
-are retained as warnings. Future benchmark runs will reference these immutable
-dataset and example IDs.
+Evaluation datasets use stable dataset and evaluation-example records rather than
+overloading a run with one question. Document filenames supplied by an import are
+resolved once to stable document IDs; missing or ambiguous names remain warnings.
+Benchmark parents reference the immutable dataset, while internal child executions
+reference its examples without becoming separate user-visible runs.
 
 ### Fingerprint-based reuse
 

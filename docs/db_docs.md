@@ -80,8 +80,8 @@ back to this stable `chunk.id`.
 | `section_path_json` | Optional ordered heading/section path for source display and filtering. |
 | `source_metadata_json` | Non-null JSON object containing parser/source metadata retained for provenance. |
 
-Parsing executes during upload. A queued run invokes chunking and writes or
-reuses this artifact before embedding begins.
+Parsing executes during upload. A prepared-index request invokes chunking and
+writes or reuses this artifact before embedding begins.
 
 ## `vector_index`
 
@@ -108,11 +108,9 @@ remain in the named Chroma collection.
 
 ## `pipeline_run`
 
-Represents one immutable single-question run submitted from the experiment
-workbench. The current background pipeline executes chunking, embedding,
-retrieval, and generation. Evaluation execution remains unimplemented, while
-immutable evaluation datasets and their resolved document labels are now
-persisted independently for later benchmark reuse.
+Retains the legacy immutable single-question execution format for compatibility.
+The current experiment workbench launches dataset-wide records in `benchmark_run`
+instead.
 
 | Field | Description |
 | --- | --- |
@@ -135,6 +133,24 @@ The question belongs to the run because it is query-specific. It is not stored
 on `corpus`, `document`, or `chunk_set`. Identical submissions create separate
 run rows, but their `chunk_set_id` values may match when the reusable fingerprint
 matches. Failures after creation remain as `failed` runs for auditability.
+
+## `benchmark_run` and `benchmark_example_run`
+
+`benchmark_run` is the single user-visible execution launched from the
+experiment workbench. It references one ready named index and one immutable
+evaluation dataset, records their shared corpus and technical vector index, and
+stores the complete effective configuration snapshot. Progress uses total and
+completed example counts plus the active example and query-time stage.
+
+`benchmark_example_run` is an internal ordered child for one stable
+`evaluation_example`. It stores independent lifecycle, stage timings, and safe
+failure details without presenting each question as a separate top-level run.
+Earlier completed children remain inspectable if a later question fails.
+
+Query-time artifacts use `benchmark_retrieval_result`,
+`benchmark_retrieved_chunk`, `benchmark_generation_result`, and
+`benchmark_generation_context_chunk`. They retain raw distances, source chunks,
+provider provenance, and exact prompt-context links under each child execution.
 
 ## `prepared_index`
 

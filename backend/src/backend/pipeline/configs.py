@@ -205,6 +205,20 @@ class EvaluationConfig(BaseModel):
         return metrics
 
 
+class ExperimentConfig(BaseModel):
+    """Capture only query-time settings selected when launching a benchmark.
+
+    Attributes:
+        retrieval: Settings applied independently to every dataset question.
+        generation: Settings applied independently to every retrieved context.
+        evaluation: Metrics requested for the later independent evaluation stage.
+    """
+
+    retrieval: RetrievalConfig
+    generation: GenerationConfig
+    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
+
+
 class PipelineConfig(BaseModel):
     """Capture the complete effective configuration saved with one run.
 

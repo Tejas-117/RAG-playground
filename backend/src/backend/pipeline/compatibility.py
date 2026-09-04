@@ -157,12 +157,15 @@ def _validate_metrics(
 def validate_pipeline_config(
     configuration: PipelineConfig,
     options: "PipelineOptionsResponse",
+    *,
+    has_evaluation_dataset: bool = False,
 ) -> None:
     """Validate one resolved configuration against the current option catalog.
 
     Args:
         configuration: Typed, default-resolved configuration submitted for a run.
         options: Validated backend-owned pipeline option catalog.
+        has_evaluation_dataset: Whether stable labels and references are available.
 
     Returns:
         None. The configuration is unchanged when it is compatible.
@@ -233,8 +236,8 @@ def validate_pipeline_config(
         "configuration.evaluation.answer_metrics",
     )
 
-    # Single-question runs have no labelled relevant documents for retrieval metrics.
-    if configuration.evaluation.retrieval_metrics:
+    # Ad hoc runs have no labelled relevant documents for retrieval metrics.
+    if not has_evaluation_dataset and configuration.evaluation.retrieval_metrics:
         raise InvalidPipelineConfigurationError(
             "configuration.evaluation.retrieval_metrics",
             "Retrieval metrics require an evaluation dataset with relevance labels.",
@@ -244,9 +247,12 @@ def validate_pipeline_config(
         metric.value: metric for metric in options.evaluation.answer_metrics
     }
 
-    # Single-question runs cannot use metrics that compare against a reference answer.
+    # Ad hoc runs cannot use metrics that compare against a reference answer.
     for metric in configuration.evaluation.answer_metrics:
-        if answer_options[metric].requires_reference_answer:
+        if (
+            not has_evaluation_dataset
+            and answer_options[metric].requires_reference_answer
+        ):
             raise InvalidPipelineConfigurationError(
                 "configuration.evaluation.answer_metrics",
                 f"Evaluation metric '{metric}' requires a reference answer.",

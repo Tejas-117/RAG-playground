@@ -20,7 +20,8 @@ class GenerationModelCapabilities:
 GROQ_MODEL_CAPABILITIES: dict[str, GenerationModelCapabilities] = {
     "openai/gpt-oss-20b": GenerationModelCapabilities(131_072, 65_536),
     "openai/gpt-oss-120b": GenerationModelCapabilities(131_072, 65_536),
-    "llama-3.2-3b-preview": GenerationModelCapabilities(128_000, 8_000),
+    "qwen/qwen3.6-27b": GenerationModelCapabilities(131_072, 16_384),
+    "qwen/qwen3.8-27b": GenerationModelCapabilities(131_042, 16_384),
 }
 
 

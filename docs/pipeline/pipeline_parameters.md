@@ -180,7 +180,7 @@ Reranking introduces another model, latency, cost, and score semantics, so it sh
 ### MVP Parameters
 
 - **LLM provider**: Groq.
-- **LLM model**: GPT-OSS 20B (default), GPT-OSS 120B, or Llama 3.2 3B Preview.
+- **LLM model**: GPT-OSS 20B (default), GPT-OSS 120B, Qwen 3.6 27B, or Qwen 3.8 27B.
 - **Temperature**.
 - **Maximum output tokens**: optional.
 

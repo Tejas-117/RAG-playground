@@ -8,6 +8,15 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, ValidationError
 
 from backend.api.routers.pipeline_options import _load_pipeline_options
+from backend.db.repositories.benchmark_runs import (
+    BenchmarkInputMismatchError,
+    BenchmarkInputNotFoundError,
+    BenchmarkRunNotFoundError,
+    create_pending_benchmark_run,
+    get_benchmark_run,
+    list_benchmark_runs,
+    resolve_benchmark_configuration,
+)
 from backend.db.repositories.runs import (
     CorpusNotFoundError,
     RunNotFoundError,
@@ -18,7 +27,7 @@ from backend.pipeline.compatibility import (
     InvalidPipelineConfigurationError,
     validate_pipeline_config,
 )
-from backend.pipeline.configs import PipelineConfig
+from backend.pipeline.configs import ExperimentConfig, PipelineConfig
 
 router = APIRouter()
 
@@ -44,6 +53,20 @@ class RunCreateRequest(BaseModel):
     corpus_id: str = Field(min_length=1)
     question: str
     configuration: PipelineConfig
+
+
+class BenchmarkRunCreateRequest(BaseModel):
+    """Represent saved artifacts and query-time settings for one benchmark.
+
+    Attributes:
+        prepared_index_id: Ready named index reused without preparation work.
+        dataset_id: Immutable dataset supplying all ordered questions.
+        configuration: Retrieval, generation, and future evaluation settings.
+    """
+
+    prepared_index_id: str = Field(min_length=1)
+    dataset_id: str = Field(min_length=1)
+    configuration: ExperimentConfig
 
 
 class RunChunkingResponse(BaseModel):
@@ -266,12 +289,77 @@ class RunResponse(BaseModel):
     error: RunErrorResponse | None = None
 
 
+class BenchmarkExampleResponse(BaseModel):
+    """Expose one internal example execution beneath its parent benchmark.
+
+    Attributes:
+        id: Stable internal execution identifier.
+        example_id: Immutable evaluation-example identifier.
+        ordinal: Zero-based dataset order.
+        question: Exact immutable dataset question.
+        reference_answer: Optional ground-truth answer retained for evaluation.
+        status: Independent child lifecycle state.
+        current_stage: Active query-time stage when running.
+        started_at: Worker start timestamp when available.
+        completed_at: Terminal timestamp when available.
+        duration_ms: Total child execution duration when terminal.
+        retrieval: Persisted ranked output after retrieval succeeds.
+        generation: Persisted answer after generation succeeds.
+        error: Safe child failure when this example terminates the benchmark.
+    """
+
+    id: str = Field(min_length=1)
+    example_id: str = Field(min_length=1)
+    ordinal: int = Field(ge=0)
+    question: str = Field(min_length=1)
+    reference_answer: str | None = None
+    status: RunStatus
+    current_stage: Literal["retrieval", "generation"] | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+    retrieval: RunRetrievalResponse | None = None
+    generation: RunGenerationResponse | None = None
+    error: RunErrorResponse | None = None
+
+
+class BenchmarkRunSummaryResponse(BaseModel):
+    """Represent one dataset-wide run without loading question-level output."""
+
+    id: str = Field(min_length=1)
+    prepared_index_id: str = Field(min_length=1)
+    prepared_index_name: str = Field(min_length=1)
+    dataset_id: str = Field(min_length=1)
+    dataset_name: str = Field(min_length=1)
+    corpus_id: str = Field(min_length=1)
+    vector_index_id: str = Field(min_length=1)
+    status: RunStatus
+    current_stage: Literal["retrieval", "generation"] | None = None
+    current_example_id: str | None = None
+    total_examples: int = Field(gt=0)
+    completed_examples: int = Field(ge=0)
+    created_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+
+
+class BenchmarkRunResponse(BenchmarkRunSummaryResponse):
+    """Represent a benchmark configuration and all ordered example executions."""
+
+    configuration: PipelineConfig
+    examples: list[BenchmarkExampleResponse]
+    error: RunErrorResponse | None = None
+
+
 @router.post(
     "/runs",
-    response_model=RunResponse,
+    response_model=RunResponse | BenchmarkRunResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def create_pipeline_run(payload: RunCreateRequest) -> RunResponse:
+async def create_pipeline_run(
+    payload: RunCreateRequest | BenchmarkRunCreateRequest,
+) -> RunResponse | BenchmarkRunResponse:
     """Validate and enqueue one run without waiting for provider execution.
 
     Args:
@@ -283,6 +371,10 @@ async def create_pipeline_run(payload: RunCreateRequest) -> RunResponse:
     Raises:
         HTTPException: If request validation or pending-run persistence fails.
     """
+    # New benchmark requests reuse saved artifacts and execute the complete dataset.
+    if isinstance(payload, BenchmarkRunCreateRequest):
+        return _create_benchmark_run(payload)
+
     normalized_question = payload.question.strip()
     logger.info(
         "pipeline_run_requested corpus_id=%s chunking_strategy=%s "
@@ -377,8 +469,121 @@ async def create_pipeline_run(payload: RunCreateRequest) -> RunResponse:
     return RunResponse.model_validate(persisted_run)
 
 
-@router.get("/runs/{run_id}", response_model=RunResponse)
-async def read_pipeline_run(run_id: str) -> RunResponse:
+def _create_benchmark_run(
+    payload: BenchmarkRunCreateRequest,
+) -> BenchmarkRunResponse:
+    """Validate saved resource lineage and enqueue one dataset benchmark.
+
+    Args:
+        payload: Prepared index, dataset, and query-time benchmark settings.
+
+    Returns:
+        Persisted pending benchmark with ordered child executions.
+
+    Raises:
+        HTTPException: If resources, compatibility, or persistence are invalid.
+    """
+    try:
+        # Merge preparation settings from the ready index into one immutable snapshot.
+        _, _, effective_configuration = resolve_benchmark_configuration(
+            payload.prepared_index_id,
+            payload.dataset_id,
+            payload.configuration,
+        )
+        options = _load_pipeline_options()
+        validate_pipeline_config(
+            effective_configuration,
+            options,
+            has_evaluation_dataset=True,
+        )
+        benchmark = create_pending_benchmark_run(
+            payload.prepared_index_id,
+            payload.dataset_id,
+            effective_configuration,
+        )
+    except BenchmarkInputNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "benchmark_input_not_found",
+                "message": "The selected prepared index or dataset does not exist.",
+            },
+        ) from error
+    except BenchmarkInputMismatchError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "incompatible_benchmark_inputs",
+                "message": str(error),
+            },
+        ) from error
+    except InvalidPipelineConfigurationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_experiment_configuration",
+                "message": error.message,
+                "field": error.field,
+            },
+        ) from error
+    except (OSError, ValidationError) as error:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "pipeline_options_unavailable",
+                "message": "The experiment options could not be loaded.",
+            },
+        ) from error
+    except sqlite3.Error as error:
+        logger.exception("benchmark_run_create_failed")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "persistence_error",
+                "message": "The benchmark run could not be saved.",
+            },
+        ) from error
+
+    logger.info(
+        "benchmark_run_enqueued run_id=%s dataset_id=%s prepared_index_id=%s",
+        benchmark["id"],
+        payload.dataset_id,
+        payload.prepared_index_id,
+    )
+    return BenchmarkRunResponse.model_validate(_add_benchmark_stage_statuses(benchmark))
+
+
+@router.get("/runs", response_model=list[BenchmarkRunSummaryResponse])
+async def read_benchmark_runs() -> list[BenchmarkRunSummaryResponse]:
+    """List user-visible dataset benchmark runs newest first.
+
+    Returns:
+        Compact benchmark summaries suitable for the Runs inventory page.
+
+    Raises:
+        HTTPException: If persisted benchmark history cannot be read.
+    """
+    try:
+        # Summary loading intentionally excludes potentially large question results.
+        runs = list_benchmark_runs()
+    except sqlite3.Error as error:
+        logger.exception("benchmark_run_list_failed")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "persistence_error",
+                "message": "Benchmark runs could not be loaded.",
+            },
+        ) from error
+
+    return [BenchmarkRunSummaryResponse.model_validate(run) for run in runs]
+
+
+@router.get(
+    "/runs/{run_id}",
+    response_model=RunResponse | BenchmarkRunResponse,
+)
+async def read_pipeline_run(run_id: str) -> RunResponse | BenchmarkRunResponse:
     """Return the latest persisted state of one pipeline run.
 
     Args:
@@ -390,6 +595,27 @@ async def read_pipeline_run(run_id: str) -> RunResponse:
     Raises:
         HTTPException: If the run is unknown or cannot be read.
     """
+    try:
+        # Benchmark IDs are checked first because they are the current public workflow.
+        benchmark = get_benchmark_run(run_id)
+        return BenchmarkRunResponse.model_validate(
+            _add_benchmark_stage_statuses(benchmark)
+        )
+    except BenchmarkRunNotFoundError:
+        pass
+    except sqlite3.Error as error:
+        logger.exception(
+            "benchmark_run_read_failed run_id=%s error_code=persistence_error",
+            run_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "persistence_error",
+                "message": "The benchmark run could not be read.",
+            },
+        ) from error
+
     try:
         # This short local SQLite read contains no parsing or provider work.
         persisted_run = get_run(run_id)
@@ -415,3 +641,34 @@ async def read_pipeline_run(run_id: str) -> RunResponse:
         ) from error
 
     return RunResponse.model_validate(persisted_run)
+
+
+def _add_benchmark_stage_statuses(benchmark: dict[str, object]) -> dict[str, object]:
+    """Add response-only lifecycle states to persisted example results.
+
+    Args:
+        benchmark: Materialized benchmark containing ordered example dictionaries.
+
+    Returns:
+        Shallow benchmark copy whose result objects satisfy the shared API schemas.
+    """
+    response = dict(benchmark)
+    examples: list[dict[str, object]] = []
+
+    # Derive stage state from each child lifecycle without persisting redundant values.
+    for raw_example in benchmark.get("examples", []):
+        example = dict(raw_example)
+        retrieval = example.get("retrieval")
+        generation = example.get("generation")
+
+        # A persisted result is complete; otherwise child state determines visibility.
+        if retrieval is not None:
+            example["retrieval"] = {"status": "completed", **retrieval}
+
+        if generation is not None:
+            example["generation"] = {"status": "completed", **generation}
+
+        examples.append(example)
+
+    response["examples"] = examples
+    return response

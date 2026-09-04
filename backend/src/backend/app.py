@@ -15,6 +15,7 @@ from backend.api.routers import (
     testing,
     uploads,
 )
+from backend.db.repositories.benchmark_runs import fail_interrupted_benchmark_runs
 from backend.db.repositories.prepared_indexes import (
     fail_interrupted_prepared_indexes,
 )
@@ -38,6 +39,7 @@ async def application_lifespan(application: FastAPI) -> AsyncIterator[None]:
     """
     # Terminalize work abandoned by a previous process before claiming queued jobs.
     fail_interrupted_prepared_indexes()
+    fail_interrupted_benchmark_runs()
     fail_interrupted_runs()
     worker = PipelineRunWorker()
     worker_task = asyncio.create_task(worker.run_forever())

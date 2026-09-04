@@ -1,6 +1,6 @@
 # Evaluation Datasets
 
-Evaluation datasets are immutable, corpus-scoped inputs for future benchmark
+Evaluation datasets are immutable, corpus-scoped inputs for dataset benchmark
 execution. Import is intentionally separate from retrieval, generation, and
 evaluation so one stable set of examples can be reused across experiments.
 
@@ -66,7 +66,7 @@ leave a partial dataset. Datasets are immutable after import.
 - `GET /datasets/{dataset_id}` returns ordered examples, resolved documents, and
   persisted import warnings.
 - `DELETE /datasets/{dataset_id}` deletes an unreferenced dataset and returns
-  `204`. Once benchmark records reference datasets, protected deletion returns
+  `204`. Once benchmark records reference a dataset, protected deletion returns
   `409 dataset_in_use` rather than removing historical inputs.
 
 ## Dataset management UI
