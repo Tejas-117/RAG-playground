@@ -9,16 +9,12 @@ from backend.pipeline.benchmark_execution import (
     BenchmarkExecutor,
     get_benchmark_executor,
 )
-from backend.pipeline.execution import (
-    PipelineExecutor,
-    PipelineRunExecutionError,
-    get_pipeline_executor,
-)
 from backend.pipeline.preparation import (
     PreparedIndexExecutionError,
     PreparedIndexExecutor,
     get_prepared_index_executor,
 )
+from backend.pipeline.query_execution import QueryExecutionError
 
 # Use the module name to isolate queue and worker lifecycle records.
 logger = logging.getLogger(__name__)
@@ -32,7 +28,6 @@ class PipelineRunWorker:
 
     def __init__(
         self,
-        executor_factory: Callable[[], PipelineExecutor] = get_pipeline_executor,
         prepared_index_executor_factory: Callable[[], PreparedIndexExecutor] = (
             get_prepared_index_executor
         ),
@@ -43,14 +38,12 @@ class PipelineRunWorker:
         """Configure the stateless executor factory used for each claimed run.
 
         Args:
-            executor_factory: Callable returning a full-run executor.
             prepared_index_executor_factory: Callable returning a preparation executor.
             benchmark_executor_factory: Callable returning a dataset benchmark executor.
 
         Returns:
             None. Queue and run state remain in SQLite.
         """
-        self._executor_factory = executor_factory
         self._prepared_index_executor_factory = prepared_index_executor_factory
         self._benchmark_executor_factory = benchmark_executor_factory
 
@@ -67,7 +60,7 @@ class PipelineRunWorker:
 
         # Claim one globally oldest job at a time to avoid competing embedding workloads.
         while True:
-            # The shared claim orders prepared indexes and legacy runs together.
+            # The shared claim orders preparation and benchmark work together.
             claimed_work = claim_next_pending_work_item()
 
             # Sleep only while the persisted queue has no work.
@@ -87,10 +80,8 @@ class PipelineRunWorker:
                 # Route the claimed durable row to its independently testable executor.
                 if work_kind == "prepared_index":
                     executor = self._prepared_index_executor_factory()
-                elif work_kind == "benchmark_run":
-                    executor = self._benchmark_executor_factory()
                 else:
-                    executor = self._executor_factory()
+                    executor = self._benchmark_executor_factory()
 
                 # Parsing, provider HTTP, Chroma, and persistence are synchronous.
                 await asyncio.to_thread(executor.execute, work_id)
@@ -103,8 +94,8 @@ class PipelineRunWorker:
                     error.stage,
                     error.code,
                 )
-            except PipelineRunExecutionError as error:
-                # The executor already persisted this expected terminal failure.
+            except QueryExecutionError as error:
+                # The benchmark executor already persisted this terminal failure.
                 logger.warning(
                     "pipeline_worker_run_failed run_id=%s stage=%s error_code=%s",
                     work_id,

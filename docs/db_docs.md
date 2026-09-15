@@ -106,34 +106,6 @@ remain in the named Chroma collection.
 | `vector_count` | Verified number of records stored in Chroma. |
 | `created_at`, `started_at`, `completed_at`, `duration_ms` | Artifact lifecycle and measured build time. |
 
-## `pipeline_run`
-
-Retains the legacy immutable single-question execution format for compatibility.
-The current experiment workbench launches dataset-wide records in `benchmark_run`
-instead.
-
-| Field | Description |
-| --- | --- |
-| `id` | Stable application-generated identifier for the run. Primary key. |
-| `corpus_id` | Immutable corpus selected for the run. Foreign key to `corpus.id`. |
-| `chunk_set_id` | Nullable while execution is pending or failed; completed runs reference the exact ready `chunk_set` they used. |
-| `vector_index_id` | Nullable until embedding succeeds; completed runs reference the exact ready index they used. |
-| `question` | Trimmed, non-empty question submitted by the user. |
-| `effective_config_json` | Canonical JSON snapshot of the complete typed pipeline configuration, including resolved defaults. |
-| `status` | Run lifecycle: `pending`, `running`, `completed`, or `failed`. |
-| `current_stage` | `chunking`, `embedding`, `retrieval`, or `generation` while a worker is executing; otherwise null. |
-| `chunk_set_reused` | Nullable until chunking succeeds; records whether this execution reused an existing ready artifact. |
-| `vector_index_reused` | Nullable until embedding succeeds; records compatible index reuse. |
-| `chunking_duration_ms` / `embedding_duration_ms` / `retrieval_duration_ms` / `generation_duration_ms` | Per-run time spent resolving each implemented stage. |
-| `created_at`, `started_at`, `completed_at` | UTC lifecycle timestamps. |
-| `duration_ms` | Total execution duration through generation. |
-| `error_code` / `error_details_json` | Safe structured terminal failure information without raw traces. |
-
-The question belongs to the run because it is query-specific. It is not stored
-on `corpus`, `document`, or `chunk_set`. Identical submissions create separate
-run rows, but their `chunk_set_id` values may match when the reusable fingerprint
-matches. Failures after creation remain as `failed` runs for auditability.
-
 ## `benchmark_run` and `benchmark_example_run`
 
 `benchmark_run` is the single user-visible execution launched from the
@@ -184,60 +156,6 @@ Different prepared-index IDs and duplicate names can reference the same
 `vector_index_id` when their corpus, chunking, embedding, provider policy,
 dimensions, distance metric, and indexer inputs are compatible.
 
-## `retrieval_result`
-
-Represents the immutable query-specific retrieval output for one pipeline run.
-It references the exact ready vector index searched and labels raw scores with
-that index's distance metric.
-
-| Field | Description |
-| --- | --- |
-| `id` | Deterministic retrieval-result identifier derived from the owning run. |
-| `pipeline_run_id` | Unique run that owns the result. Deleting the run cascades to this result. |
-| `vector_index_id` | Exact compatible ready vector index searched for the run. |
-| `requested_top_k` | Positive nearest-neighbor limit from the immutable run configuration. |
-| `returned_count` | Number of ranked hits returned; it may be zero or less than `requested_top_k`. |
-| `distance_metric` | `cosine`, `dot_product`, or `euclidean`, matching the vector index. |
-| `duration_ms` | Retrieval stage wall-clock duration in milliseconds. |
-| `created_at` | UTC timestamp when the complete result was saved. |
-
-## `retrieved_chunk`
-
-Stores ordered references from one retrieval result to immutable application
-chunks. Text and source provenance are hydrated from `chunk` instead of being
-duplicated here.
-
-| Field | Description |
-| --- | --- |
-| `retrieval_result_id` | Parent retrieval result. Deleting the parent cascades to its ranked rows. |
-| `rank` | Contiguous one-based nearest-neighbor position. Unique within the result. |
-| `chunk_id` | Stable chunk returned by the exact searched index's chunk set. |
-| `raw_distance` | Finite, unmodified distance returned by the vector store. |
-
-The retrieval parent, every ranked child, and the run's transition to
-`generation` are written in one SQLite transaction. Any validation or storage
-failure leaves no partial result.
-
-## `generation_result`
-
-Stores the one immutable answer produced for a run and its exact retrieval
-result. It records requested and provider-reported model identity, the resolved
-generation configuration, prompt and provider policy versions, answer text,
-finish reason, optional token usage, provider request/fingerprint metadata,
-whether a provider call occurred, and generation duration. The prompt is
-reconstructable and is not duplicated as raw text.
-
-## `generation_context_chunk`
-
-Links a generated answer to the exact contiguous prefix of retrieval ranks sent
-as context. These rows preserve prompt ordering even when context budgeting
-excludes lower-ranked retrieval hits.
-
-The answer, every context link, generation timing, and the run's transition to
-`completed` share one transaction. A failed child write leaves no partial
-answer. See [generation_docs.md](generation_docs.md) for prompt and provider
-behavior.
-
 ## Operational Note
 
 SQLite foreign-key checks are disabled by default. Every application connection
@@ -253,17 +171,15 @@ embedding configuration, then returns `202` with a pending durable request.
 `GET /indexes` lists newest records and accepts an optional `status` filter.
 `GET /indexes/{prepared_index_id}` returns one pollable lifecycle record. The
 application worker chooses the oldest pending job across prepared indexes and
-legacy pipeline runs so local embedding workloads do not compete. A restart
-marks abandoned running preparation requests as failed with a structured error.
+dataset benchmarks so local provider workloads do not compete. A restart marks
+abandoned running jobs as failed with a structured error.
 
-The `POST /runs` route validates a selected corpus, a single question, and the
-complete pipeline configuration, stores a `pending` row, and returns `202`
-without waiting for model execution. The application-owned worker atomically
-claims the oldest queued run, builds or reuses its chunk and vector artifacts,
-searches the vector index for the saved question, persists the ranked result,
-generates and saves an answer, and records every stage transition.
-`GET /runs/{run_id}` returns lifecycle state, hydrated retrieval chunks, and
-generation output for polling.
+The `POST /runs` route validates a ready prepared index, a compatible evaluation
+dataset, and query-time configuration. It stores one pending benchmark with an
+ordered child execution for every dataset example and returns `202`. The worker
+retrieves and generates for each child against the selected vector index.
+`GET /runs` lists benchmark summaries, while `GET /runs/{run_id}` returns the
+benchmark lifecycle and its question-level outputs.
 
 The development database has no migration compatibility guarantee at this
 stage. After this schema edit, recreate `backend/rag_playground.sqlite3` before

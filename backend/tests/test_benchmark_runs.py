@@ -7,11 +7,14 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+from pydantic import ValidationError
+
 from backend.api.routers.runs import (
     BenchmarkRunCreateRequest,
     BenchmarkRunResponse,
     _add_benchmark_stage_statuses,
-    create_pipeline_run,
+    create_benchmark_run,
 )
 from backend.db.connection import connect
 from backend.db.repositories.benchmark_runs import (
@@ -302,7 +305,7 @@ def test_runs_api_enqueues_saved_dataset_benchmark() -> None:
             dataset_id="dataset-1",
             configuration=_experiment_configuration(),
         )
-        response = asyncio.run(create_pipeline_run(request))
+        response = asyncio.run(create_benchmark_run(request))
 
         assert isinstance(response, BenchmarkRunResponse)
         assert response.status == "pending"
@@ -310,3 +313,31 @@ def test_runs_api_enqueues_saved_dataset_benchmark() -> None:
         assert response.configuration.embedding.model == "nomic-embed-text"
 
     database_directory.cleanup()
+
+
+def test_runs_api_contract_rejects_legacy_single_question_payload() -> None:
+    """Verify the runs request contract no longer accepts ad-hoc questions.
+
+    Returns:
+        None. Validation must reject the removed corpus/question request shape.
+    """
+    legacy_payload = {
+        "corpus_id": "corpus-1",
+        "question": "What is the refund policy?",
+        "configuration": _experiment_configuration().model_dump(mode="json"),
+    }
+
+    # Required benchmark identities are absent from the removed request format.
+    with pytest.raises(ValidationError):
+        BenchmarkRunCreateRequest.model_validate(legacy_payload)
+
+    # A question is also forbidden when otherwise-valid benchmark IDs are present.
+    mixed_payload = {
+        "prepared_index_id": "prepared-index-1",
+        "dataset_id": "dataset-1",
+        "configuration": _experiment_configuration().model_dump(mode="json"),
+        "question": "This field belonged to the removed workflow.",
+    }
+
+    with pytest.raises(ValidationError):
+        BenchmarkRunCreateRequest.model_validate(mixed_payload)

@@ -8,16 +8,15 @@ The backend implements three document-local strategies over persisted
 - `paragraph`
 
 Chunking does not parse source files again and never combines text from separate
-documents. A persisted background worker invokes chunking through
-`PipelineExecutor`, which builds or reuses the exact artifact before handing it
-to embedding.
+documents. A persisted background worker invokes chunking through the prepared
+index executor, which builds or reuses the artifact before handing it to embedding.
 
 ## Shared Flow
 
 ```text
-POST /runs + resolved PipelineConfig
-    -> persist pending pipeline_run and return 202
-    -> worker claims run and marks chunking active
+POST /indexes + resolved PreparationConfig
+    -> persist pending prepared_index and return 202
+    -> worker claims the preparation and marks chunking active
     -> pass corpus ID + resolved ChunkingConfig to the chunking service
     -> load ordered documents and canonical parses
     -> calculate compatibility fingerprint
@@ -25,8 +24,8 @@ POST /runs + resolved PipelineConfig
     -> tokenize and chunk every document independently
     -> attach page, block, parser, and document provenance
     -> atomically persist chunk_set and chunks
-    -> link chunk_set from pipeline_run
-    -> advance the run to embedding
+    -> link chunk_set from prepared_index
+    -> advance the preparation to embedding
 ```
 
 The process is:
@@ -47,7 +46,7 @@ The process is:
    ordinal, then derive provenance through indexed offset intersection.
 8. Persist the chunk set and all of its chunks in one SQLite transaction, then
    read the completed artifact through the repository boundary.
-9. Store the ready chunk-set ID, reuse flag, and chunking duration on the run,
+9. Store the ready chunk-set ID, reuse flag, and duration on the prepared index,
    then advance its `current_stage` to `embedding`.
 
 Chunk ordinals start at zero for every source document. Documents are never
@@ -67,23 +66,19 @@ output counts, durations, reuse decisions, and stable identifiers. See
 [logging_docs.md](logging_docs.md) for the logging configuration and privacy
 rules.
 
-## Pipeline Execution and Failures
+## Preparation Execution and Failures
 
-`PipelineExecutor` owns stage ordering and the overall run lifecycle. It does
-not implement tokenization or chunk boundaries; those remain in the chunking
-service and strategy classes. It passes the ready artifact to the implemented
-embedding/index service, followed by retrieval and generation. Evaluation
-remains a future stage.
+`PreparedIndexExecutor` owns chunking and embedding order. It does not implement
+tokenization or chunk boundaries; those remain in the chunking service and
+strategy classes. Retrieval and generation happen later in dataset benchmarks.
 
 Chunking runs in a local background worker because tokenization and SQLite work
-are synchronous. `POST /runs` returns the persisted pending run immediately.
-`GET /runs/{run_id}` exposes queued and active stage state, then the ready chunk
-set ID, count, reuse flag, and measured duration. Chunk bodies remain internal
-to the embedding stage.
+are synchronous. `POST /indexes` returns the pending preparation immediately.
+`GET /indexes/{prepared_index_id}` exposes active stage state and the ready chunk
+set ID, count, reuse flag, and duration. Chunk bodies remain internal.
 
-Failures after run creation are persisted with `failed` status, a stable error
-code, safe structured details, and timing. Chunk-set writes remain atomic, so a
-failed run cannot reference a partial artifact.
+Failures are persisted on the prepared index with `failed` status, a stable error
+code, safe structured details, and timing. Chunk-set writes remain atomic.
 
 ## Shared Chunk Rules
 

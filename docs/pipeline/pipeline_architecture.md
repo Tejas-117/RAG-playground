@@ -328,10 +328,9 @@ If one example fails, earlier completed outputs remain inspectable while the par
 run and active child receive the same safe structured failure.
 
 The effective configuration includes ordered `retrieval_metrics` and
-`answer_metrics` lists. Both lists may be empty to skip evaluation. A
-single-question run may select groundedness and answer relevance together, but
-cannot select retrieval metrics or answer correctness because it has no labelled
-relevant documents or reference answer.
+`answer_metrics` lists. Both lists may be empty to skip evaluation. Dataset
+examples provide the relevance labels and optional reference answers required by
+the selected metrics.
 
 Evaluation datasets use stable dataset and evaluation-example records rather than
 overloading a run with one question. Document filenames supplied by an import are
@@ -377,18 +376,15 @@ For example, changing only `top_k` does not change parse, chunk, or index finger
 
 Chunk-set construction remains an independent internal stage service. It
 atomically writes a `ready` parent and all child chunks, or rolls the transaction
-back. `PipelineExecutor` invokes it from `POST /runs`, records lifecycle state,
-and links the resulting artifact without implementing chunk-boundary logic.
+back. `PreparedIndexExecutor` invokes it for `POST /indexes`, records lifecycle
+state, and links the artifact without implementing chunk-boundary logic.
 
 The executor is the sequencing boundary for later services:
 
 ```text
-PipelineExecutor
-  -> ChunkingService
-  -> EmbeddingIndexService
-  -> RetrievalService
-  -> GenerationService
-  -> EvaluationService      # future
+PreparedIndexExecutor -> ChunkingService -> EmbeddingIndexService
+BenchmarkExecutor     -> RetrievalService -> GenerationService
+EvaluationExecutor    -> EvaluationService                         # future
 ```
 
 Each service owns its domain behavior and provider adapters. The executor owns
@@ -400,18 +396,21 @@ stateless between requests so execution can move behind a job abstraction later.
 Use explicit domain tables rather than a generic catch-all `artifacts` table at first:
 
 ```text
-corpora
-documents
-parsed_documents
-chunk_sets
-chunks
-vector_indexes
-experiments or pipeline_configs
-runs
-retrieval_results
-retrieved_chunks
-generation_results
-evaluation_results
+corpus
+document
+document_parse
+chunk_set
+chunk
+vector_index
+prepared_index
+evaluation_dataset
+evaluation_example
+benchmark_run
+benchmark_example_run
+benchmark_retrieval_result
+benchmark_retrieved_chunk
+benchmark_generation_result
+evaluation_result                 # future
 ```
 
 Core relationships:

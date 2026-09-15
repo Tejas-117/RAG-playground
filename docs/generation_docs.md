@@ -31,15 +31,15 @@ into source code, logs, documentation, or chat.
 ## Pipeline Flow
 
 ```text
-retrieval completes
-  -> atomically persist retrieval_result + retrieved_chunk rows
-  -> advance pipeline_run to generation
+benchmark retrieval completes
+  -> atomically persist the child retrieval result and ranked chunks
+  -> advance the benchmark child to generation
   -> pack ranked chunks within the model context budget
   -> build the versioned source-labelled RAG prompt
   -> call Groq Chat Completions synchronously with stream=false
   -> validate answer, finish reason, usage, and provider provenance
-  -> atomically persist generation_result + generation_context_chunk rows
-  -> record generation duration and complete pipeline_run
+  -> atomically persist the child generation result and context links
+  -> record generation duration and complete the benchmark child
 ```
 
 The worker already runs synchronous pipeline work in a separate thread, so a
@@ -69,16 +69,17 @@ insufficient-context answer with zero token usage.
 
 ## Persistence and API
 
-`generation_result` stores the answer, requested and provider-reported model,
+`benchmark_generation_result` stores each answer and its requested and
+provider-reported model,
 effective generation settings, prompt/provider policy versions, finish reason,
 optional token usage, request/fingerprint metadata, whether Groq was called,
-and stage duration. `generation_context_chunk` stores the exact retrieval ranks
-included in the prompt.
+and stage duration. `benchmark_generation_context_chunk` stores the exact
+retrieval ranks included in the prompt.
 
 `GET /runs/{run_id}` exposes the hydrated ranked retrieval result and generation
 state. After success it includes the answer, model provenance, usage, finish
 reason, context links, and duration. A generation failure leaves the completed
-retrieval result, chunk set, and vector index available while rolling back any
+retrieval result and prepared-index provenance available while rolling back any
 partial answer rows.
 
 Generation logs contain provider/model identifiers, context count, finish

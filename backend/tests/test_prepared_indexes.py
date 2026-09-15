@@ -379,43 +379,6 @@ class PreparedIndexRouteTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(poll_response.json()["chunking"]["status"], "completed")
         self.assertEqual(poll_response.json()["embedding"]["status"], "completed")
 
-    async def test_shared_queue_claims_oldest_job_across_job_types(self) -> None:
-        """Verify legacy runs and preparations share one creation-ordered queue.
-
-        Args:
-            None.
-
-        Returns:
-            None. Assertions verify global FIFO selection across both tables.
-        """
-        # Insert an older legacy row directly so this test focuses on queue ordering.
-        with connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO pipeline_run (
-                    id, corpus_id, question, effective_config_json,
-                    status, created_at
-                ) VALUES (?, ?, ?, ?, 'pending', ?)
-                """,
-                (
-                    "older-pipeline-run",
-                    "corpus-1",
-                    "What is older?",
-                    "{}",
-                    "2026-01-01T00:00:00Z",
-                ),
-            )
-
-        create_response = await self._request("POST", "/indexes", _index_payload())
-        claimed_work = claim_next_pending_work_item()
-
-        # The worker must not prioritize resource type over durable insertion time.
-        self.assertEqual(create_response.status_code, 202)
-        self.assertEqual(
-            claimed_work,
-            {"kind": "pipeline_run", "id": "older-pipeline-run"},
-        )
-
     async def test_embedding_failure_keeps_ready_chunk_artifact(self) -> None:
         """Verify a provider failure is safe and preserves completed chunking work.
 

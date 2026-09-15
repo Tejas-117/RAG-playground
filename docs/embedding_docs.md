@@ -7,21 +7,20 @@ inside the persisted background-run workflow.
 ## Architecture
 
 ```text
-POST /runs
-  -> persist pending pipeline_run and return 202
-  -> local worker claims the oldest pending run
+POST /indexes
+  -> persist pending prepared_index and return 202
+  -> local worker claims the oldest pending preparation
   -> build or reuse chunk_set
   -> call the configured embedding provider over HTTP
   -> validate and store explicit vectors in Chroma
   -> persist ready vector_index metadata in SQLite
-  -> attach vector_index and advance pipeline_run to retrieval
-  -> retrieve ranked chunks and generate an answer before completion
+  -> attach vector_index and mark prepared_index ready
 
-GET /runs/{run_id}
+GET /indexes/{prepared_index_id}
   -> return current stage, artifact summaries, timings, or safe failure
 ```
 
-`PipelineExecutor` coordinates ordering but does not contain Ollama or Chroma
+`PreparedIndexExecutor` coordinates ordering but does not contain Ollama or Chroma
 logic. `EmbeddingProvider` defines the provider-neutral model interface, and
 `VectorStore` defines the provider-neutral index interface. Provider SDK or
 HTTP details remain behind adapters.

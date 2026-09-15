@@ -52,16 +52,15 @@ Chunking emits:
 - `chunk_set_rejected`, `chunk_set_persistence_failed`, or
   `chunk_set_readback_failed`
 
-Pipeline execution emits:
+Dataset benchmark execution emits:
 
-- `pipeline_run_requested`
-- `pipeline_run_enqueued`
+- `benchmark_run_enqueued`
 - `pipeline_worker_started`
-- `pipeline_worker_run_claimed`
-- `pipeline_run_started`
-- `pipeline_run_stage_completed`
-- `pipeline_run_completed`
-- `pipeline_run_rejected`, `pipeline_run_stage_failed`, or
+- `pipeline_worker_work_claimed`
+- `benchmark_run_started`
+- `benchmark_example_completed`
+- `benchmark_run_completed`
+- `benchmark_run_failed` or
   `pipeline_worker_run_failed`
 
 Embedding and vector indexing emit:
@@ -72,15 +71,13 @@ Embedding and vector indexing emit:
 - `vector_index_reused` or `vector_index_reused_after_race`
 - `vector_index_build_failed`
 
-Retrieval is represented by `pipeline_run_stage_completed` with
-`stage=retrieval`. The record includes the searched vector-index ID, returned
-hit count, labelled distance metric, and retrieval duration. Retrieval failures
-use `pipeline_run_stage_failed` with a safe retrieval-specific error code.
+Retrieval duration and returned context are retained on each benchmark example.
+Retrieval failures use a safe retrieval-specific error code on the child and
+parent benchmark records.
 
-Generation is represented by `pipeline_run_stage_completed` with
-`stage=generation`. The record contains provider/model identifiers, included
-context count, whether a provider call was required, finish reason, and duration.
-Generation failures use safe stage-specific error codes without provider bodies.
+Generation provider/model provenance, prompt context, usage, finish reason, and
+duration are persisted per benchmark example. Failures use safe stage-specific
+error codes without provider bodies.
 
 Normal lifecycle transitions use `INFO`. Invalid input and expected rejected
 operations use `WARNING`. Unexpected operational failures use `ERROR` with an

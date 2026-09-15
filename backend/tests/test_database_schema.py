@@ -41,11 +41,6 @@ def test_schema_creates_corpus_and_document_tables() -> None:
         "parsed_block",
         "chunk_set",
         "chunk",
-        "retrieval_result",
-        "retrieved_chunk",
-        "generation_result",
-        "generation_context_chunk",
-        "pipeline_run",
         "prepared_index",
         "evaluation_dataset",
         "evaluation_example",
@@ -338,197 +333,31 @@ def test_schema_records_chunk_set_provenance_and_chunks() -> None:
         raise AssertionError("chunk ordinals must be unique per source document")
 
 
-def test_schema_records_single_question_pipeline_runs() -> None:
-    """Verify run lifecycle, configuration, and chunk-set provenance constraints.
+def test_schema_omits_legacy_single_question_tables() -> None:
+    """Verify removed ad-hoc run persistence is not recreated by the schema.
 
-    Parameters:
-        None.
     Returns:
-        None. Assertions verify run persistence and integrity constraints.
+        None. Assertions ensure only dataset benchmark run tables remain.
     """
-    # Create an isolated database with production-equivalent foreign-key enforcement.
+    # Execute the production schema with foreign keys enabled.
     connection = sqlite3.connect(":memory:")
     connection.execute("PRAGMA foreign_keys = ON")
     connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
 
-    # Insert the immutable corpus required by the run foreign key.
-    connection.execute(
-        "INSERT INTO corpus VALUES (?, ?, ?, ?, ?)",
-        (
-            "corpus-1",
-            "Product docs",
-            None,
-            "2026-08-02T00:00:00Z",
-            "2026-08-02T00:00:00Z",
-        ),
-    )
-
-    # Insert the ready reusable artifact required by a completed run.
-    connection.execute(
-        """
-        INSERT INTO chunk_set (
-            id, corpus_id, fingerprint, chunking_config_json, chunker_name,
-            chunker_version, status, chunk_count, created_at, started_at,
-            completed_at, duration_ms, error_code, error_details_json
-        ) VALUES (?, ?, ?, ?, ?, ?, 'ready', 0, ?, ?, ?, 1, NULL, NULL)
-        """,
-        (
-            "chunk-set-1",
-            "corpus-1",
-            "fingerprint-1",
-            '{"strategy":"recursive"}',
-            "recursive",
-            "1.0.0",
-            "2026-08-02T00:00:00Z",
-            "2026-08-02T00:00:00Z",
-            "2026-08-02T00:00:01Z",
-        ),
-    )
-
-    # Insert the ready vector artifact required by a completed embedding run.
-    connection.execute(
-        """
-        INSERT INTO vector_index (
-            id, chunk_set_id, fingerprint, embedding_config_json, provider,
-            model, provider_model, provider_revision, dimensions,
-            distance_metric, input_policy_version, indexer_name,
-            indexer_version, collection_name, status, vector_count,
-            created_at, started_at, completed_at, duration_ms
-        ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, ?
+    # Query exact table names formerly owned by single-question execution.
+    legacy_tables = {
+        "pipeline_run",
+        "retrieval_result",
+        "retrieved_chunk",
+        "generation_result",
+        "generation_context_chunk",
+    }
+    persisted_legacy_tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
         )
-        """,
-        (
-            "vector-index-1",
-            "chunk-set-1",
-            "vector-fingerprint-1",
-            '{"provider":"ollama","model":"nomic-embed-text"}',
-            "ollama",
-            "nomic-embed-text",
-            "nomic-embed-text",
-            3,
-            "cosine",
-            "nomic-retrieval-prefix-v1",
-            "chroma-persistent",
-            "1",
-            "rag_idx_test",
-            1,
-            "2026-08-02T00:00:01Z",
-            "2026-08-02T00:00:01Z",
-            "2026-08-02T00:00:02Z",
-            1,
-        ),
-    )
+        if row[0] in legacy_tables
+    }
 
-    # Persist a completed run linked directly to the exact ready chunk artifact.
-    connection.execute(
-        """
-        INSERT INTO pipeline_run (
-            id, corpus_id, chunk_set_id, vector_index_id, question,
-            effective_config_json, status, current_stage, chunk_set_reused,
-            vector_index_reused, chunking_duration_ms, embedding_duration_ms,
-            retrieval_duration_ms, generation_duration_ms,
-            created_at, started_at, completed_at, duration_ms, error_code,
-            error_details_json
-        ) VALUES (
-            ?, ?, ?, ?, ?, ?, 'completed', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            NULL, NULL
-        )
-        """,
-        (
-            "run-1",
-            "corpus-1",
-            "chunk-set-1",
-            "vector-index-1",
-            "What is the refund policy?",
-            '{"retrieval":{"top_k":10}}',
-            0,
-            0,
-            1,
-            1,
-            1,
-            1,
-            "2026-08-02T00:00:01Z",
-            "2026-08-02T00:00:01Z",
-            "2026-08-02T00:00:02Z",
-            1000,
-        ),
-    )
-    persisted_run = connection.execute(
-        """
-        SELECT corpus_id, chunk_set_id, question, effective_config_json,
-               status, chunk_set_reused
-        FROM pipeline_run
-        """
-    ).fetchone()
-
-    # Confirm immutable input and the selected reusable artifact remain distinguishable.
-    assert persisted_run == (
-        "corpus-1",
-        "chunk-set-1",
-        "What is the refund policy?",
-        '{"retrieval":{"top_k":10}}',
-        "completed",
-        0,
-    )
-
-    # Exercise malformed input snapshots independently of lifecycle constraints.
-    invalid_runs = [
-        (
-            "run-blank",
-            "   ",
-            "{}",
-            "2026-08-02T00:00:02Z",
-        ),
-        (
-            "run-json",
-            "Question",
-            "invalid",
-            "2026-08-02T00:00:01Z",
-        ),
-    ]
-
-    # Reject blank questions and malformed configuration snapshots at persistence time.
-    for invalid_run in invalid_runs:
-        try:
-            connection.execute(
-                """
-                INSERT INTO pipeline_run (
-                    id, corpus_id, question, effective_config_json,
-                    status, created_at
-                ) VALUES (?, 'corpus-1', ?, ?, 'pending', ?)
-                """,
-                invalid_run,
-            )
-        except sqlite3.IntegrityError:
-            # The expected integrity failure proves the corresponding check is active.
-            pass
-        else:
-            # Fail explicitly if SQLite accepts an unusable run record.
-            raise AssertionError(
-                "pipeline runs require a question and valid JSON config"
-            )
-
-    # A completed run cannot omit the artifact and lifecycle values it claims exist.
-    try:
-        connection.execute(
-            """
-            INSERT INTO pipeline_run (
-                id, corpus_id, question, effective_config_json,
-                status, created_at
-            ) VALUES (?, ?, ?, ?, 'completed', ?)
-            """,
-            (
-                "run-incomplete",
-                "corpus-1",
-                "Question",
-                "{}",
-                "2026-08-02T00:00:04Z",
-            ),
-        )
-    except sqlite3.IntegrityError:
-        # Lifecycle checks prevent a completed run without a ready artifact reference.
-        pass
-    else:
-        # Fail explicitly if SQLite accepts contradictory completed-run state.
-        raise AssertionError("completed pipeline runs require chunk provenance")
+    assert persisted_legacy_tables == set()

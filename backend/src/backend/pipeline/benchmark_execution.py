@@ -16,15 +16,15 @@ from backend.embedding.models import EmbeddingProvider, VectorStore
 from backend.generation.models import GenerationProvider
 from backend.generation.service import generate_answer
 from backend.ingestion.chunkers.models import ChunkingTokenizer
-from backend.pipeline.execution import (
+from backend.pipeline.query_execution import (
     AnswerGenerator,
     ChunkRetriever,
-    _elapsed_milliseconds,
-    _map_execution_error,
+    elapsed_milliseconds,
+    map_query_execution_error,
 )
 from backend.retrieval.service import retrieve_chunks
 
-# Use this module name to keep benchmark events separate from legacy pipeline logs.
+# Use this module name to keep benchmark lifecycle events easy to filter.
 logger = logging.getLogger(__name__)
 
 
@@ -68,7 +68,7 @@ class BenchmarkExecutor:
             Completed benchmark with every question-level result.
 
         Raises:
-            PipelineRunExecutionError: If one example fails after safe persistence.
+            QueryExecutionError: If one example fails after safe persistence.
         """
         execution_input = get_benchmark_execution_input(benchmark_run_id)
         configuration = execution_input["configuration"]
@@ -105,7 +105,7 @@ class BenchmarkExecutor:
                     self._embedding_provider,
                     self._vector_store,
                 )
-                retrieval_duration_ms = _elapsed_milliseconds(retrieval_started_counter)
+                retrieval_duration_ms = elapsed_milliseconds(retrieval_started_counter)
                 retrieval_result_id = record_benchmark_retrieval(
                     benchmark_run_id,
                     active_example_run_id,
@@ -126,7 +126,7 @@ class BenchmarkExecutor:
                     self._generation_provider,
                     self._tokenizer,
                 )
-                generation_duration_ms = _elapsed_milliseconds(
+                generation_duration_ms = elapsed_milliseconds(
                     generation_started_counter
                 )
                 complete_benchmark_example(
@@ -136,7 +136,7 @@ class BenchmarkExecutor:
                     configuration,
                     answer,
                     generation_duration_ms,
-                    _elapsed_milliseconds(example_started_counter),
+                    elapsed_milliseconds(example_started_counter),
                 )
                 logger.info(
                     "benchmark_example_completed run_id=%s example_id=%s "
@@ -150,20 +150,20 @@ class BenchmarkExecutor:
 
             completed_run = complete_benchmark_run(
                 benchmark_run_id,
-                _elapsed_milliseconds(run_started_counter),
+                elapsed_milliseconds(run_started_counter),
             )
             logger.info("benchmark_run_completed run_id=%s", benchmark_run_id)
             return completed_run
         except Exception as error:
             # Reuse provider-neutral error categories already established by each stage.
-            execution_error = _map_execution_error(
+            execution_error = map_query_execution_error(
                 benchmark_run_id,
                 current_stage,
                 error,
             )
-            duration_ms = _elapsed_milliseconds(run_started_counter)
+            duration_ms = elapsed_milliseconds(run_started_counter)
             example_duration_ms = (
-                _elapsed_milliseconds(example_started_counter)
+                elapsed_milliseconds(example_started_counter)
                 if example_started_counter is not None
                 else 0
             )

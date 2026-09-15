@@ -219,11 +219,9 @@ Keep evaluation optional and simple:
 - **Answer metrics**: select any combination of groundedness, answer relevance,
   and answer correctness when their required inputs exist.
 
-The query remains required, but both metric lists may be empty. Empty lists mean
-the run produces retrieval and generation output without evaluating it. New
-single-question experiments initially select groundedness and answer relevance;
-users may clear both selections. Retrieval metrics and answer correctness require
-dataset annotations and are unavailable for an ad hoc question.
+Both metric lists may be empty. Empty lists mean the benchmark produces retrieval
+and generation output without evaluating it. Retrieval metrics require resolved
+document labels, and answer correctness requires reference answers.
 
 Evaluation configuration is stored with the immutable run snapshot. Metric
 execution and evaluation-result artifacts remain unavailable until the

@@ -1,11 +1,11 @@
-"""HTTP routes for enqueueing and polling immutable pipeline runs."""
+"""HTTP routes for enqueueing and inspecting dataset benchmark runs."""
 
 import logging
 import sqlite3
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from backend.api.routers.pipeline_options import _load_pipeline_options
 from backend.db.repositories.benchmark_runs import (
@@ -16,12 +16,6 @@ from backend.db.repositories.benchmark_runs import (
     get_benchmark_run,
     list_benchmark_runs,
     resolve_benchmark_configuration,
-)
-from backend.db.repositories.runs import (
-    CorpusNotFoundError,
-    RunNotFoundError,
-    create_pending_run,
-    get_run,
 )
 from backend.pipeline.compatibility import (
     InvalidPipelineConfigurationError,
@@ -41,20 +35,6 @@ RunStatus = Literal["pending", "running", "completed", "failed"]
 StageStatus = Literal["pending", "running", "completed", "failed"]
 
 
-class RunCreateRequest(BaseModel):
-    """Represent the user input required to enqueue one pipeline run.
-
-    Attributes:
-        corpus_id: Stable identifier of the selected immutable corpus.
-        question: Ad hoc question retained for later retrieval and generation.
-        configuration: Complete typed pipeline configuration for the run.
-    """
-
-    corpus_id: str = Field(min_length=1)
-    question: str
-    configuration: PipelineConfig
-
-
 class BenchmarkRunCreateRequest(BaseModel):
     """Represent saved artifacts and query-time settings for one benchmark.
 
@@ -64,53 +44,12 @@ class BenchmarkRunCreateRequest(BaseModel):
         configuration: Retrieval, generation, and future evaluation settings.
     """
 
+    # Reject removed ad-hoc fields instead of silently ignoring stale clients.
+    model_config = ConfigDict(extra="forbid")
+
     prepared_index_id: str = Field(min_length=1)
     dataset_id: str = Field(min_length=1)
     configuration: ExperimentConfig
-
-
-class RunChunkingResponse(BaseModel):
-    """Describe chunking state and its reusable artifact when available.
-
-    Attributes:
-        status: Current lifecycle state of the chunking stage.
-        chunk_set_id: Ready chunk artifact identifier after chunking succeeds.
-        chunk_count: Number of chunks in the ready artifact.
-        reused: Whether this run reused an existing compatible artifact.
-        duration_ms: Time this run spent resolving the chunking stage.
-    """
-
-    status: StageStatus
-    chunk_set_id: str | None = None
-    chunk_count: int | None = Field(default=None, ge=0)
-    reused: bool | None = None
-    duration_ms: int | None = Field(default=None, ge=0)
-
-
-class RunEmbeddingResponse(BaseModel):
-    """Describe embedding state, configuration, and artifact when available.
-
-    Attributes:
-        status: Current lifecycle state of the embedding stage.
-        vector_index_id: Ready vector-index identifier after embedding succeeds.
-        vector_count: Number of vectors stored in the ready index.
-        dimensions: Width of every vector in the index.
-        provider: Backend-registered provider from the immutable run snapshot.
-        model: Provider model identifier from the immutable run snapshot.
-        distance_metric: Distance space used by the vector collection.
-        reused: Whether this run reused a compatible ready vector index.
-        duration_ms: Time this run spent resolving the embedding stage.
-    """
-
-    status: StageStatus
-    vector_index_id: str | None = None
-    vector_count: int | None = Field(default=None, ge=0)
-    dimensions: int | None = Field(default=None, gt=0)
-    provider: str
-    model: str
-    distance_metric: Literal["cosine", "dot_product", "euclidean"]
-    reused: bool | None = None
-    duration_ms: int | None = Field(default=None, ge=0)
 
 
 class RunRetrievedChunkResponse(BaseModel):
@@ -243,52 +182,6 @@ class RunErrorResponse(BaseModel):
     details: dict[str, object] = Field(default_factory=dict)
 
 
-class RunResponse(BaseModel):
-    """Represent one persisted run at any queue or execution state.
-
-    Attributes:
-        id: Stable application-generated run identifier.
-        corpus_id: Stable identifier of the selected immutable corpus.
-        question: Normalized question saved for the run.
-        configuration: Resolved immutable configuration snapshot.
-        status: Overall persisted lifecycle state.
-        current_stage: Stage currently executing, or ``None`` when inactive.
-        created_at: UTC timestamp when the run was enqueued.
-        started_at: UTC timestamp when a worker claimed the run.
-        completed_at: UTC timestamp when the run reached a terminal state.
-        duration_ms: Total execution duration for a terminal run.
-        chunking: Current chunking state and optional artifact summary.
-        embedding: Current embedding state and optional artifact summary.
-        retrieval: Current retrieval state and ranked result when available.
-        generation: Current generation state and answer when available.
-        error: Safe structured failure for a failed run.
-    """
-
-    id: str
-    corpus_id: str
-    question: str
-    configuration: PipelineConfig
-    status: RunStatus
-    current_stage: (
-        Literal[
-            "chunking",
-            "embedding",
-            "retrieval",
-            "generation",
-        ]
-        | None
-    ) = None
-    created_at: str
-    started_at: str | None = None
-    completed_at: str | None = None
-    duration_ms: int | None = Field(default=None, ge=0)
-    chunking: RunChunkingResponse
-    embedding: RunEmbeddingResponse
-    retrieval: RunRetrievalResponse
-    generation: RunGenerationResponse
-    error: RunErrorResponse | None = None
-
-
 class BenchmarkExampleResponse(BaseModel):
     """Expose one internal example execution beneath its parent benchmark.
 
@@ -354,135 +247,24 @@ class BenchmarkRunResponse(BenchmarkRunSummaryResponse):
 
 @router.post(
     "/runs",
-    response_model=RunResponse | BenchmarkRunResponse,
+    response_model=BenchmarkRunResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def create_pipeline_run(
-    payload: RunCreateRequest | BenchmarkRunCreateRequest,
-) -> RunResponse | BenchmarkRunResponse:
-    """Validate and enqueue one run without waiting for provider execution.
+async def create_benchmark_run(
+    payload: BenchmarkRunCreateRequest,
+) -> BenchmarkRunResponse:
+    """Validate and enqueue one dataset benchmark without waiting for execution.
 
     Args:
-        payload: Selected corpus, question, and complete pipeline configuration.
+        payload: Prepared index, dataset, and query-time configuration.
 
     Returns:
-        Persisted pending run suitable for polling through ``GET /runs/{id}``.
+        Persisted pending benchmark suitable for polling through ``GET /runs/{id}``.
 
     Raises:
         HTTPException: If request validation or pending-run persistence fails.
     """
-    # New benchmark requests reuse saved artifacts and execute the complete dataset.
-    if isinstance(payload, BenchmarkRunCreateRequest):
-        return _create_benchmark_run(payload)
-
-    normalized_question = payload.question.strip()
-    logger.info(
-        "pipeline_run_requested corpus_id=%s chunking_strategy=%s "
-        "embedding_provider=%s embedding_model=%s",
-        payload.corpus_id,
-        payload.configuration.chunking.strategy.value,
-        payload.configuration.embedding.provider,
-        payload.configuration.embedding.model,
-    )
-
-    # Reject blank questions before creating an immutable queue record.
-    if not normalized_question:
-        logger.warning(
-            "pipeline_run_rejected corpus_id=%s error_code=invalid_question",
-            payload.corpus_id,
-        )
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "invalid_question",
-                "message": "Question must not be blank.",
-            },
-        )
-
-    try:
-        # Resolve catalog compatibility before enqueueing an immutable snapshot.
-        options = _load_pipeline_options()
-        validate_pipeline_config(payload.configuration, options)
-        persisted_run = create_pending_run(
-            payload.corpus_id,
-            normalized_question,
-            payload.configuration,
-        )
-    except CorpusNotFoundError as error:
-        logger.warning(
-            "pipeline_run_rejected corpus_id=%s error_code=corpus_not_found",
-            payload.corpus_id,
-        )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "corpus_not_found",
-                "message": "The selected corpus does not exist.",
-            },
-        ) from error
-    except InvalidPipelineConfigurationError as error:
-        logger.warning(
-            "pipeline_run_rejected corpus_id=%s "
-            "error_code=invalid_pipeline_configuration field=%s",
-            payload.corpus_id,
-            error.field,
-        )
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "invalid_pipeline_configuration",
-                "message": error.message,
-                "field": error.field,
-            },
-        ) from error
-    except (OSError, ValidationError) as error:
-        logger.exception(
-            "pipeline_run_rejected corpus_id=%s "
-            "error_code=pipeline_options_unavailable",
-            payload.corpus_id,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "code": "pipeline_options_unavailable",
-                "message": "The pipeline configuration options could not be loaded.",
-            },
-        ) from error
-    except sqlite3.Error as error:
-        logger.exception(
-            "pipeline_run_rejected corpus_id=%s error_code=persistence_error",
-            payload.corpus_id,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "code": "persistence_error",
-                "message": "The pipeline run could not be saved.",
-            },
-        ) from error
-
-    logger.info(
-        "pipeline_run_enqueued run_id=%s corpus_id=%s",
-        persisted_run["id"],
-        payload.corpus_id,
-    )
-    return RunResponse.model_validate(persisted_run)
-
-
-def _create_benchmark_run(
-    payload: BenchmarkRunCreateRequest,
-) -> BenchmarkRunResponse:
-    """Validate saved resource lineage and enqueue one dataset benchmark.
-
-    Args:
-        payload: Prepared index, dataset, and query-time benchmark settings.
-
-    Returns:
-        Persisted pending benchmark with ordered child executions.
-
-    Raises:
-        HTTPException: If resources, compatibility, or persistence are invalid.
-    """
+    # Benchmarks reuse prepared artifacts and execute every immutable dataset example.
     try:
         # Merge preparation settings from the ready index into one immutable snapshot.
         _, _, effective_configuration = resolve_benchmark_configuration(
@@ -581,28 +363,34 @@ async def read_benchmark_runs() -> list[BenchmarkRunSummaryResponse]:
 
 @router.get(
     "/runs/{run_id}",
-    response_model=RunResponse | BenchmarkRunResponse,
+    response_model=BenchmarkRunResponse,
 )
-async def read_pipeline_run(run_id: str) -> RunResponse | BenchmarkRunResponse:
-    """Return the latest persisted state of one pipeline run.
+async def read_benchmark_run(run_id: str) -> BenchmarkRunResponse:
+    """Return the latest persisted state of one dataset benchmark.
 
     Args:
         run_id: Stable identifier returned by ``POST /runs``.
 
     Returns:
-        Current pending, running, completed, or failed run representation.
+        Current pending, running, completed, or failed benchmark representation.
 
     Raises:
         HTTPException: If the run is unknown or cannot be read.
     """
     try:
-        # Benchmark IDs are checked first because they are the current public workflow.
+        # Materialize the parent and ordered child results in one detail response.
         benchmark = get_benchmark_run(run_id)
         return BenchmarkRunResponse.model_validate(
             _add_benchmark_stage_statuses(benchmark)
         )
-    except BenchmarkRunNotFoundError:
-        pass
+    except BenchmarkRunNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "run_not_found",
+                "message": "The selected benchmark run does not exist.",
+            },
+        ) from error
     except sqlite3.Error as error:
         logger.exception(
             "benchmark_run_read_failed run_id=%s error_code=persistence_error",
@@ -615,32 +403,6 @@ async def read_pipeline_run(run_id: str) -> RunResponse | BenchmarkRunResponse:
                 "message": "The benchmark run could not be read.",
             },
         ) from error
-
-    try:
-        # This short local SQLite read contains no parsing or provider work.
-        persisted_run = get_run(run_id)
-    except RunNotFoundError as error:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "run_not_found",
-                "message": "The selected pipeline run does not exist.",
-            },
-        ) from error
-    except sqlite3.Error as error:
-        logger.exception(
-            "pipeline_run_read_failed run_id=%s error_code=persistence_error",
-            run_id,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "code": "persistence_error",
-                "message": "The pipeline run could not be read.",
-            },
-        ) from error
-
-    return RunResponse.model_validate(persisted_run)
 
 
 def _add_benchmark_stage_statuses(benchmark: dict[str, object]) -> dict[str, object]:

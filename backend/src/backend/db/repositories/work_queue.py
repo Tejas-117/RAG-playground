@@ -1,4 +1,4 @@
-"""Shared SQLite queue claim for preparation requests and legacy pipeline runs."""
+"""Shared SQLite queue claim for preparation requests and benchmark runs."""
 
 from datetime import datetime, timezone
 from typing import Literal, TypedDict
@@ -14,7 +14,7 @@ class ClaimedWorkItem(TypedDict):
         id: Stable identifier of the claimed persistence record.
     """
 
-    kind: Literal["benchmark_run", "prepared_index", "pipeline_run"]
+    kind: Literal["benchmark_run", "prepared_index"]
     id: str
 
 
@@ -61,9 +61,6 @@ def claim_next_pending_work_item() -> ClaimedWorkItem | None:
                 SELECT id, 'prepared_index' AS kind, created_at
                 FROM prepared_index WHERE status = 'pending'
                 UNION ALL
-                SELECT id, 'pipeline_run' AS kind, created_at
-                FROM pipeline_run WHERE status = 'pending'
-                UNION ALL
                 SELECT id, 'benchmark_run' AS kind, created_at
                 FROM benchmark_run WHERE status = 'pending'
             )
@@ -76,20 +73,11 @@ def claim_next_pending_work_item() -> ClaimedWorkItem | None:
         if row is None:
             return None
 
-        # Preparation and legacy runs begin in chunking; benchmarks begin at retrieval.
+        # Preparation begins in chunking, while benchmarks begin at retrieval.
         if row["kind"] == "prepared_index":
             cursor = connection.execute(
                 """
                 UPDATE prepared_index
-                SET status = 'running', current_stage = 'chunking', started_at = ?
-                WHERE id = ? AND status = 'pending'
-                """,
-                (started_at, row["id"]),
-            )
-        elif row["kind"] == "pipeline_run":
-            cursor = connection.execute(
-                """
-                UPDATE pipeline_run
                 SET status = 'running', current_stage = 'chunking', started_at = ?
                 WHERE id = ? AND status = 'pending'
                 """,
