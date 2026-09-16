@@ -39,6 +39,68 @@ single corpus.
 | `content_sha256` | SHA-256 digest of file contents for integrity checks and future deduplication. |
 | `uploaded_at` | UTC timestamp when the application accepted the source file. |
 
+## Parsing tables
+
+Parsing stores one canonical text value per document. Pages and blocks point
+into that text through character offsets instead of duplicating extracted text.
+
+```text
+document
+└── document_parse
+    ├── parsed_page
+    │   └── parsed_block
+    └── parsed_block without a page, when the format has no physical pages
+```
+
+### `document_parse`
+
+Represents the immutable canonical parse artifact for one uploaded document.
+Each document can have at most one parse.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable parse identifier. Primary key. |
+| `document_id` | Source document parsed into this artifact. Unique. |
+| `normalized_text` | Complete normalized text referenced by page and block offsets. |
+| `utf8_size_bytes` | Positive UTF-8 byte size of the normalized text. |
+| `character_count` | Positive Unicode character count of the normalized text. |
+| `parser_name` / `parser_version` | Parser implementation identity retained for provenance. |
+| `document_metadata_json` | Parser-produced document-level metadata object. |
+| `warnings_json` | Ordered array of non-fatal parsing warnings. |
+| `page_count` / `block_count` | Number of child page and block records. |
+| `duration_ms` | Parsing duration in milliseconds. |
+| `created_at` | UTC timestamp when the parse was persisted. |
+
+### `parsed_page`
+
+Represents one physical or logical page range within a parse's canonical text.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable page identifier. Primary key. |
+| `parse_id` | Parent canonical parse. |
+| `page_number` | One-based page number, unique within the parse. |
+| `character_start_offset` | Inclusive zero-based start in `normalized_text`. |
+| `character_end_offset` | Exclusive zero-based end in `normalized_text`. |
+| `metadata_json` | Parser-produced page metadata object. |
+
+### `parsed_block`
+
+Represents one ordered source-aware block within canonical parsed text. A block
+may have no page when its source format does not provide physical pages.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable block identifier. Primary key. |
+| `parse_id` | Parent canonical parse. |
+| `page_id` | Optional parent page from the same parse. |
+| `ordinal` | Zero-based block order, unique within the parse. |
+| `source_block_index` | Optional zero-based parser/source block position. |
+| `character_start_offset` | Inclusive zero-based start in `normalized_text`. |
+| `character_end_offset` | Exclusive zero-based end in `normalized_text`. |
+| `bounding_box_json` | Optional parser-provided block coordinates. |
+| `metadata_json` | Parser-produced block metadata object. |
+
 ## `chunk_set`
 
 Represents the complete, reusable result of applying one exact chunking
@@ -106,7 +168,7 @@ remain in the named Chroma collection.
 | `vector_count` | Verified number of records stored in Chroma. |
 | `created_at`, `started_at`, `completed_at`, `duration_ms` | Artifact lifecycle and measured build time. |
 
-## `benchmark_run` and `benchmark_example_run`
+## Benchmark execution tables
 
 `benchmark_run` is the single user-visible execution launched from the
 experiment workbench. It references one ready named index and one immutable
@@ -114,10 +176,117 @@ evaluation dataset, records their shared corpus and technical vector index, and
 stores the complete effective configuration snapshot. Progress uses total and
 completed example counts plus the active example and query-time stage.
 
-`benchmark_example_run` is an internal ordered child for one stable
-`evaluation_example`. It stores independent lifecycle, stage timings, and safe
-failure details without presenting each question as a separate top-level run.
-Earlier completed children remain inspectable if a later question fails.
+```text
+benchmark_run
+└── benchmark_example_run
+    ├── benchmark_retrieval_result
+    │   └── benchmark_retrieved_chunk
+    └── benchmark_generation_result
+        └── benchmark_generation_context_chunk
+            └── references a benchmark_retrieved_chunk rank
+```
+
+### `benchmark_run`
+
+Represents one dataset-wide experiment execution. This is the run displayed to
+the user; individual questions remain children of this aggregate.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable identifier for the benchmark. Primary key. |
+| `prepared_index_id` | Named, ready index selected by the user. |
+| `dataset_id` | Immutable evaluation dataset executed by the benchmark. |
+| `corpus_id` | Shared corpus lineage of the index and dataset. |
+| `vector_index_id` | Exact technical vector index searched by every example. |
+| `effective_config_json` | Immutable resolved snapshot of chunking, embedding, retrieval, generation, and evaluation settings. |
+| `status` | Aggregate lifecycle: `pending`, `running`, `completed`, or `failed`. |
+| `current_stage` | Active query-time stage: `retrieval`, `generation`, or null. |
+| `current_example_id` | Dataset example currently being processed, when running. |
+| `total_examples` / `completed_examples` | Stable workload size and completed-child progress. |
+| `created_at`, `started_at`, `completed_at` | UTC lifecycle timestamps. |
+| `duration_ms` | Total benchmark duration when terminal. |
+| `error_code` / `error_details_json` | Safe structured benchmark-level failure. |
+
+### `benchmark_example_run`
+
+Represents the execution of one stable `evaluation_example` within a benchmark.
+It keeps each question's lifecycle and failure independent without presenting
+each question as a separate top-level run. Earlier completed children remain
+inspectable if a later question fails.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable identifier for this question execution. Primary key. |
+| `benchmark_run_id` | Parent dataset-wide benchmark. |
+| `evaluation_example_id` | Immutable source question and reference answer. |
+| `ordinal` | Zero-based execution and display order inherited from the dataset. |
+| `status` | Child lifecycle: `pending`, `running`, `completed`, or `failed`. |
+| `current_stage` | Active stage: `retrieval`, `generation`, or null. |
+| `retrieval_duration_ms` / `generation_duration_ms` | Per-stage durations for this question. |
+| `started_at`, `completed_at`, `duration_ms` | Child lifecycle timestamps and total duration. |
+| `error_code` / `error_details_json` | Safe structured failure for this question. |
+
+### `benchmark_retrieval_result`
+
+Stores the retrieval operation performed for one example run. There can be at
+most one retrieval result per example execution.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable retrieval-result identifier. Primary key. |
+| `example_run_id` | Example execution that asked the question. Unique. |
+| `vector_index_id` | Exact vector index searched. |
+| `requested_top_k` | Maximum number of chunks requested from vector search. |
+| `returned_count` | Actual number of ranked chunks returned. |
+| `distance_metric` | Semantics of stored distances: cosine, dot product, or Euclidean. |
+| `duration_ms` | Retrieval-stage duration. |
+| `created_at` | UTC timestamp when the result was persisted. |
+
+### `benchmark_retrieved_chunk`
+
+Stores one ranked vector-search hit. It references the canonical `chunk` row,
+so chunk text and source metadata are not duplicated here.
+
+| Field | Description |
+| --- | --- |
+| `retrieval_result_id` | Retrieval result containing this hit. Part of the primary key. |
+| `rank` | One-based result position. Part of the primary key. |
+| `chunk_id` | Stable canonical chunk returned by vector search. |
+| `raw_distance` | Unmodified distance returned by the vector store. |
+
+### `benchmark_generation_result`
+
+Stores the generated answer and its provider, prompt, usage, timing, and request
+provenance. There can be at most one generated answer per example and retrieval
+result.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable generation-result identifier. Primary key. |
+| `example_run_id` | Example execution for which the answer was generated. Unique. |
+| `retrieval_result_id` | Exact retrieval result used to build the prompt. Unique. |
+| `provider` / `model` / `provider_model` | Requested provider and model plus optional provider-reported model. |
+| `prompt_template_version` | Backend prompt-template version used for reproducibility. |
+| `provider_policy_version` | Provider adapter's versioned request policy. |
+| `generation_config_json` | Immutable resolved generation settings. |
+| `answer_text` / `finish_reason` | Generated answer and provider completion reason. |
+| `prompt_tokens`, `completion_tokens`, `total_tokens` | Provider-reported usage when available. |
+| `provider_request_id` / `system_fingerprint` | Optional provider request provenance. |
+| `provider_called` | Whether producing this result required a provider call. |
+| `duration_ms` / `created_at` | Generation duration and persistence timestamp. |
+
+### `benchmark_generation_context_chunk`
+
+Records exactly which retrieved chunks were inserted into the generation prompt
+and their prompt order. Retrieval may return more chunks than fit in the model's
+context, so this table distinguishes retrieved evidence from consumed evidence.
+
+| Field | Description |
+| --- | --- |
+| `generation_result_id` | Generated answer that consumed this context. |
+| `ordinal` | One-based position of the chunk inside the prompt context. |
+| `retrieval_result_id` | Retrieval result from which the chunk came. |
+| `retrieval_rank` | Rank identifying the corresponding `benchmark_retrieved_chunk`. |
 
 Query-time artifacts use `benchmark_retrieval_result`,
 `benchmark_retrieved_chunk`, `benchmark_generation_result`, and
@@ -155,6 +324,56 @@ only in the vector store.
 Different prepared-index IDs and duplicate names can reference the same
 `vector_index_id` when their corpus, chunking, embedding, provider policy,
 dimensions, distance metric, and indexer inputs are compatible.
+
+## Evaluation dataset tables
+
+These tables retain imported questions and resolve optional filename-based
+relevance labels to stable document identifiers.
+
+```text
+evaluation_dataset
+└── evaluation_example
+    └── evaluation_example_relevant_document
+        └── document
+```
+
+### `evaluation_dataset`
+
+Represents one immutable user-imported evaluation dataset scoped to a corpus.
+The imported JSON file itself is not retained.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable dataset identifier. Primary key. |
+| `name` | Required user-facing name, limited to 100 characters. |
+| `corpus_id` | Corpus whose documents can be used as relevance labels. |
+| `source_filename` | Original imported JSON filename retained for display. |
+| `source_sha256` | SHA-256 identity of the exact imported JSON content. |
+| `import_warnings_json` | Warnings for skipped unknown or ambiguous document names. |
+| `created_at` | UTC timestamp when the dataset was imported. |
+
+### `evaluation_example`
+
+Represents one stable ordered question within an evaluation dataset.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable example identifier. Primary key. |
+| `dataset_id` | Parent evaluation dataset. |
+| `ordinal` | Zero-based question order, unique within the dataset. |
+| `question` | Required non-empty question text. |
+| `reference_answer` | Optional expected answer used by answer-level evaluation. |
+
+### `evaluation_example_relevant_document`
+
+Joins an evaluation example to each document considered relevant. It is a
+many-to-many relationship because a question may require multiple documents,
+and one document may be relevant to multiple questions.
+
+| Field | Description |
+| --- | --- |
+| `example_id` | Evaluation example carrying the relevance label. Part of the primary key. |
+| `document_id` | Stable relevant document resolved during import. Part of the primary key. |
 
 ## Operational Note
 
