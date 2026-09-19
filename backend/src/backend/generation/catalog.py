@@ -24,6 +24,12 @@ GROQ_MODEL_CAPABILITIES: dict[str, GenerationModelCapabilities] = {
     "qwen/qwen3.8-27b": GenerationModelCapabilities(131_042, 16_384),
 }
 
+# Conservative local limits avoid assuming that Ollama was started with 128K context.
+OLLAMA_MODEL_CAPABILITIES: dict[str, GenerationModelCapabilities] = {
+    "llama3.2:1b": GenerationModelCapabilities(8_192, 2_048),
+    "llama3.2:3b": GenerationModelCapabilities(8_192, 2_048),
+}
+
 
 def get_generation_model_capabilities(
     provider: str,
@@ -41,12 +47,18 @@ def get_generation_model_capabilities(
     Raises:
         LookupError: If the selected provider or model has no registered limits.
     """
-    # Groq is the only executable generation provider in the current backend.
-    if provider != "groq":
+    # Resolve limits through the provider namespace so identical tags cannot collide.
+    provider_catalogs = {
+        "groq": GROQ_MODEL_CAPABILITIES,
+        "ollama": OLLAMA_MODEL_CAPABILITIES,
+    }
+
+    # An unknown provider cannot be packed safely or resolved to an adapter.
+    if provider not in provider_catalogs:
         raise LookupError(f"Generation provider '{provider}' is not registered.")
 
     # A model without trusted limits cannot be packed safely into a request.
     try:
-        return GROQ_MODEL_CAPABILITIES[model]
+        return provider_catalogs[provider][model]
     except KeyError as error:
         raise LookupError(f"Generation model '{model}' is not registered.") from error

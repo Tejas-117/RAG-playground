@@ -13,7 +13,7 @@ from backend.app import app
 
 
 def test_pipeline_options_expose_supported_generation_models() -> None:
-    """Verify the catalog contains the currently supported Groq generation models.
+    """Verify the catalog contains supported hosted and local generation models.
 
     Args:
         None. The test reads the version-controlled backend catalog.
@@ -51,6 +51,18 @@ def test_pipeline_options_expose_supported_generation_models() -> None:
     assert generation_provider["models"][0]["capabilities"] == {
         "context_window_tokens": 131072,
         "max_output_tokens": 65536,
+    }
+
+    # Ollama generation exposes only the two explicitly supported local tags.
+    ollama_provider = catalog["generation"]["providers"][1]
+    assert ollama_provider["value"] == "ollama"
+    assert [model["value"] for model in ollama_provider["models"]] == [
+        "llama3.2:1b",
+        "llama3.2:3b",
+    ]
+    assert ollama_provider["models"][0]["capabilities"] == {
+        "context_window_tokens": 8192,
+        "max_output_tokens": 2048,
     }
 
     # Keep initial multi-selection behavior owned by the backend metric catalog.

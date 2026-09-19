@@ -1,4 +1,4 @@
-"""Offline tests for the Groq generation-provider adapter."""
+"""Offline tests for generation-provider adapters."""
 
 import os
 from types import SimpleNamespace
@@ -13,9 +13,14 @@ from backend.generation.models import (
     GenerationMessage,
     GenerationProviderUnavailableError,
     GenerationRateLimitError,
+    GenerationRequestRejectedError,
     InvalidGenerationResponseError,
 )
-from backend.generation.providers import GroqGenerationProvider
+from backend.generation.providers import (
+    GroqGenerationProvider,
+    OllamaHttpGenerationProvider,
+    get_generation_provider,
+)
 
 
 class CapturingCompletions:
@@ -154,6 +159,129 @@ def test_groq_provider_does_not_send_gpt_oss_options_to_qwen() -> None:
     request = completions.requests[0]
     assert "include_reasoning" not in request
     assert "reasoning_effort" not in request
+
+
+def test_ollama_provider_sends_non_streaming_chat_request() -> None:
+    """Verify Ollama receives messages and sampling options over HTTP.
+
+    Returns:
+        None. Assertions cover request shape and normalized response provenance.
+    """
+    captured_request: dict[str, object] = {}
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        """Capture one fake Ollama request and return a valid chat response.
+
+        Args:
+            request: HTTP request emitted by the Ollama generation adapter.
+
+        Returns:
+            Deterministic response matching Ollama's non-streaming chat shape.
+        """
+        captured_request["url"] = str(request.url)
+        captured_request["json"] = request.read().decode("utf-8")
+        return httpx.Response(
+            200,
+            json={
+                "model": "llama3.2:3b",
+                "message": {"role": "assistant", "content": "Local answer"},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 12,
+                "eval_count": 5,
+            },
+        )
+
+    # MockTransport keeps this provider test deterministic and fully offline.
+    client = httpx.Client(
+        base_url="http://ollama.test",
+        transport=httpx.MockTransport(handle_request),
+    )
+    provider = OllamaHttpGenerationProvider(client=client)
+    result = provider.generate(
+        "llama3.2:3b",
+        (
+            GenerationMessage(role="system", content="Instructions"),
+            GenerationMessage(role="user", content="Question and context"),
+        ),
+        0.3,
+        256,
+    )
+
+    assert captured_request["url"] == "http://ollama.test/api/chat"
+    assert captured_request["json"] == (
+        '{"model":"llama3.2:3b","messages":'
+        '[{"role":"system","content":"Instructions"},'
+        '{"role":"user","content":"Question and context"}],'
+        '"stream":false,"options":{"temperature":0.3,"num_predict":256}}'
+    )
+    assert result.answer_text == "Local answer"
+    assert result.provider_model == "llama3.2:3b"
+    assert result.finish_reason == "stop"
+    assert result.total_tokens == 17
+
+    client.close()
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_error"),
+    [
+        (404, GenerationRequestRejectedError),
+        (500, GenerationProviderUnavailableError),
+    ],
+)
+def test_ollama_provider_maps_http_failures(
+    status_code: int,
+    expected_error: type[Exception],
+) -> None:
+    """Verify missing models and server failures use safe error categories.
+
+    Args:
+        status_code: Fake Ollama HTTP status returned by the transport.
+        expected_error: Provider-neutral exception expected from the adapter.
+
+    Returns:
+        None. The assertion verifies graceful local-provider failure handling.
+    """
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        """Return the configured failure for one offline Ollama request.
+
+        Args:
+            request: HTTP request providing response association metadata.
+
+        Returns:
+            Deterministic non-success response.
+        """
+        return httpx.Response(status_code, request=request, text="model unavailable")
+
+    client = httpx.Client(
+        base_url="http://ollama.test",
+        transport=httpx.MockTransport(handle_request),
+    )
+    provider = OllamaHttpGenerationProvider(client=client)
+
+    # Provider failures must not leak raw transport or server response details.
+    with pytest.raises(expected_error):
+        provider.generate(
+            "llama3.2:1b",
+            (GenerationMessage(role="user", content="Question"),),
+            0.2,
+            100,
+        )
+
+    client.close()
+
+
+def test_generation_provider_registry_resolves_ollama() -> None:
+    """Verify the provider registry exposes the local Ollama adapter.
+
+    Returns:
+        None. The resolved type proves runtime configuration is executable.
+    """
+    provider = get_generation_provider("ollama")
+
+    assert isinstance(provider, OllamaHttpGenerationProvider)
 
 
 def test_groq_provider_requires_server_side_api_key() -> None:

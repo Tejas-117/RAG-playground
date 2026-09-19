@@ -20,7 +20,7 @@ from backend.pipeline.query_execution import QueryExecutionError
 logger = logging.getLogger(__name__)
 
 # A short idle delay keeps local UI latency low without continuously polling SQLite.
-RUN_QUEUE_POLL_INTERVAL_SECONDS = 0.5
+RUN_QUEUE_POLL_INTERVAL_SECONDS = 2
 
 
 class PipelineRunWorker:

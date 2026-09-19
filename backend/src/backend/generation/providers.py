@@ -1,10 +1,11 @@
-"""Groq HTTP-SDK adapter behind the provider-neutral generation contract."""
+"""HTTP adapters behind the provider-neutral generation contract."""
 
 import os
 from pathlib import Path
 from typing import Any
 
 import groq
+import httpx
 from dotenv import load_dotenv
 
 from backend.generation.models import (
@@ -28,6 +29,15 @@ GROQ_REQUEST_TIMEOUT_SECONDS = 120.0
 
 # Request-policy changes can alter output and must remain visible in provenance.
 _GROQ_POLICY_VERSION = "groq-chat-completions-v1"
+
+# Local Ollama generation shares the same configurable service origin as embedding.
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+
+# Bound one local generation request without limiting the full benchmark duration.
+OLLAMA_REQUEST_TIMEOUT_SECONDS = 120.0
+
+# Request-shape changes must remain distinguishable in generated-answer provenance.
+_OLLAMA_POLICY_VERSION = "ollama-chat-v1"
 
 
 class GroqGenerationProvider:
@@ -320,6 +330,248 @@ class GroqGenerationProvider:
         return result.strip()
 
 
+class OllamaHttpGenerationProvider:
+    """Generate answers through Ollama's HTTP API without managing local models."""
+
+    identifier = "ollama-http"
+    version = "1"
+
+    def __init__(
+        self,
+        client: httpx.Client | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        """Configure an injectable synchronous Ollama HTTP client.
+
+        Args:
+            client: Optional preconfigured client used by deterministic tests.
+            base_url: Optional service origin overriding ``OLLAMA_BASE_URL``.
+
+        Returns:
+            None. The adapter does not inspect, install, or start local models.
+        """
+        resolved_base_url = (
+            base_url or os.getenv("OLLAMA_BASE_URL") or DEFAULT_OLLAMA_BASE_URL
+        ).rstrip("/")
+
+        # Own a bounded client only when tests or callers do not inject one.
+        self._client = client or httpx.Client(
+            base_url=resolved_base_url,
+            timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS,
+        )
+
+    def policy_version(self, model: str) -> str:
+        """Return the versioned Ollama request policy for one model.
+
+        Args:
+            model: Ollama model tag selected by the benchmark.
+
+        Returns:
+            Stable policy identity persisted with the generated answer.
+        """
+        # Both registered Llama models use the same non-streaming chat policy.
+        return _OLLAMA_POLICY_VERSION
+
+    def generate(
+        self,
+        model: str,
+        messages: tuple[GenerationMessage, ...],
+        temperature: float,
+        max_output_tokens: int,
+    ) -> GenerationProviderResponse:
+        """Request and validate one non-streaming Ollama chat response.
+
+        Args:
+            model: Ollama model tag submitted to the local service.
+            messages: Ordered system and user messages built by the prompt service.
+            temperature: Sampling temperature from the benchmark snapshot.
+            max_output_tokens: Maximum generated tokens requested from Ollama.
+
+        Returns:
+            Provider-neutral answer with available model and token provenance.
+
+        Raises:
+            GenerationProviderError: If transport, HTTP, or validation fails.
+        """
+        request_payload = {
+            "model": model,
+            "messages": [
+                {"role": message.role, "content": message.content}
+                for message in messages
+            ],
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_output_tokens,
+            },
+        }
+
+        try:
+            # The synchronous request runs inside the worker's dedicated thread.
+            response = self._client.post("/api/chat", json=request_payload)
+            response.raise_for_status()
+        except httpx.TimeoutException as error:
+            raise GenerationRequestTimeoutError(
+                "The generation provider request timed out."
+            ) from error
+        except httpx.HTTPStatusError as error:
+            self._raise_http_error(error.response)
+        except httpx.RequestError as error:
+            raise GenerationProviderUnavailableError(
+                "The generation provider could not be reached."
+            ) from error
+
+        try:
+            # JSON decoding remains inside the untrusted provider boundary.
+            payload = response.json()
+        except ValueError as error:
+            raise InvalidGenerationResponseError(
+                "The generation provider returned invalid JSON."
+            ) from error
+
+        return self._validate_response(payload)
+
+    def _raise_http_error(self, response: httpx.Response) -> None:
+        """Translate one Ollama HTTP failure into a safe generation category.
+
+        Args:
+            response: Non-successful Ollama response with status and safe text.
+
+        Returns:
+            Never returns because a mapped provider-neutral exception is raised.
+
+        Raises:
+            GenerationProviderError: Stable category derived from HTTP metadata.
+        """
+        status_code = response.status_code
+
+        # Authentication failures matter when Ollama is exposed through a gateway.
+        if status_code in {401, 403}:
+            raise GenerationAuthenticationError(
+                "The generation provider rejected backend authentication."
+            )
+
+        # A gateway may rate-limit an otherwise local or remote Ollama deployment.
+        if status_code == 429:
+            raise GenerationRateLimitError(
+                "The generation provider rate limit was reached."
+            )
+
+        response_text = response.text.casefold()
+
+        # Preserve context-limit failures separately from missing-model rejection.
+        if status_code in {400, 413, 422} and any(
+            marker in response_text
+            for marker in ("context length", "too long", "input length")
+        ):
+            raise GenerationInputTooLargeError(
+                "The generation prompt exceeds the selected model's input limit."
+            )
+
+        # Server failures usually indicate an unavailable or unhealthy local service.
+        if status_code >= 500:
+            raise GenerationProviderUnavailableError(
+                "The generation provider could not complete the request."
+            )
+
+        # Missing models and other client errors are safe request rejections.
+        raise GenerationRequestRejectedError(
+            "The generation provider rejected the model or request."
+        )
+
+    def _validate_response(self, payload: Any) -> GenerationProviderResponse:
+        """Validate an untrusted Ollama chat response before domain use.
+
+        Args:
+            payload: JSON-decoded value returned by ``POST /api/chat``.
+
+        Returns:
+            Immutable provider-neutral answer and optional usage provenance.
+
+        Raises:
+            InvalidGenerationResponseError: If required fields are malformed.
+        """
+        # Ollama returns the assistant content inside one nested message object.
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("message"), dict
+        ):
+            raise InvalidGenerationResponseError(
+                "The generation provider response did not contain a message."
+            )
+
+        message = payload["message"]
+        answer_text = message.get("content")
+        finish_reason = payload.get("done_reason")
+
+        # Empty assistant content cannot become a persisted benchmark answer.
+        if not isinstance(answer_text, str) or not answer_text.strip():
+            raise InvalidGenerationResponseError(
+                "The generation provider returned an empty answer."
+            )
+
+        # A completed non-streaming response must explain why generation stopped.
+        if not isinstance(finish_reason, str) or not finish_reason.strip():
+            raise InvalidGenerationResponseError(
+                "The generation provider omitted its finish reason."
+            )
+
+        prompt_tokens = self._optional_token_count(payload, "prompt_eval_count")
+        completion_tokens = self._optional_token_count(payload, "eval_count")
+        total_tokens = (
+            prompt_tokens + completion_tokens
+            if prompt_tokens is not None and completion_tokens is not None
+            else None
+        )
+        provider_model = payload.get("model")
+
+        # Model provenance is optional, but a present value must be meaningful.
+        if provider_model is not None and (
+            not isinstance(provider_model, str) or not provider_model.strip()
+        ):
+            raise InvalidGenerationResponseError(
+                "The generation provider returned invalid model provenance."
+            )
+
+        return GenerationProviderResponse(
+            answer_text=answer_text.strip(),
+            provider_model=provider_model.strip() if provider_model else None,
+            finish_reason=finish_reason.strip(),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
+
+    def _optional_token_count(
+        self,
+        payload: dict[str, Any],
+        field: str,
+    ) -> int | None:
+        """Read one optional non-negative Ollama token counter.
+
+        Args:
+            payload: Validated top-level Ollama response object.
+            field: Token-count field to read.
+
+        Returns:
+            Non-negative count, or ``None`` when Ollama omitted the field.
+
+        Raises:
+            InvalidGenerationResponseError: If a present count is invalid.
+        """
+        value = payload.get(field)
+
+        # Older Ollama versions may omit optional token accounting fields.
+        if value is None:
+            return None
+
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise InvalidGenerationResponseError(
+                "The generation provider returned invalid token usage."
+            )
+
+        return value
+
+
 def get_generation_provider(provider: str) -> GenerationProvider:
     """Resolve one backend-registered generation provider adapter.
 
@@ -335,6 +587,10 @@ def get_generation_provider(provider: str) -> GenerationProvider:
     # Provider resolution remains centralized as additional APIs are introduced.
     if provider == "groq":
         return GroqGenerationProvider()
+
+    # Ollama remains an HTTP dependency; the backend never manages its process.
+    if provider == "ollama":
+        return OllamaHttpGenerationProvider()
 
     raise GenerationRequestRejectedError(
         "The selected generation provider is not registered."
