@@ -128,9 +128,13 @@ def _build_bounded_messages(
         generation_config.provider,
         generation_config.model,
     )
+
+    # we use 90% of the context window at max
     safe_context_tokens = (
         capabilities.context_window_tokens * CONTEXT_SAFETY_PERCENT // 100
     )
+
+    # input tokens left after dedicating tokens for output
     input_budget_tokens = safe_context_tokens - generation_config.max_output_tokens
     user_prefix = f"<question>\n{question}\n</question>\n\n<retrieved_context>\n"
     user_suffix = "</retrieved_context>"
@@ -167,6 +171,7 @@ def _build_bounded_messages(
         )
 
     user_message = f"{user_prefix}{''.join(source_blocks)}{user_suffix}"
+
     return (
         (
             GenerationMessage(role="system", content=_SYSTEM_MESSAGE),

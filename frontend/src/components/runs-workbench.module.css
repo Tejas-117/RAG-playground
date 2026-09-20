@@ -1,0 +1,95 @@
+/* Inherit the existing workbench palette and type; the ledger is the page's focal point. */
+.shell { display: grid; min-height: 100vh; color: var(--charcoal); }
+.workspace { min-width: 0; padding: 36px 24px; background: var(--page-surface); }
+.header, .actions, .summary > div, .filterFooter, .pagination {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+}
+.header { margin-bottom: 24px; flex-wrap: wrap; }
+.header h1 { font-size: 36px; font-weight: 650; letter-spacing: -1.2px; }
+.header p { margin-top: 6px; color: var(--tone-black); font-size: 14px; }
+.actions { justify-content: flex-start; gap: 10px; flex-wrap: wrap; }
+.workspace button, .primary {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 9px 13px; border: 1px solid var(--border-strong); border-radius: 3px;
+  background: var(--white); font-size: 13px;
+}
+.workspace .primary { background: var(--charcoal); color: var(--white); }
+.workspace button:hover:not(:disabled) { background: var(--panel-surface); }
+.workspace button:disabled { cursor: not-allowed; opacity: .45; }
+.workspace :is(button, a, select, input):focus-visible {
+  outline: 2px solid var(--charcoal); outline-offset: 3px;
+}
+.preview, .explanation { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.preview { margin-bottom: 24px; color: var(--tone-black); }
+.preview svg, .explanation svg, .failure svg { flex-shrink: 0; }
+.summaries { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.summary { background: var(--white); border: 1px solid var(--border-strong); padding: 24px; }
+.summary h2, .columns { font-size: 10px; font-weight: 650; text-transform: uppercase; }
+.summary h2 { letter-spacing: .8px; }
+.summary > strong { display: block; font-size: 40px; font-weight: 600; margin: 10px 0; }
+.summary p { border-top: 1px solid var(--border-soft); padding-top: 12px; font-size: 12px; }
+.summary p, .summary svg { color: var(--tone-black); }
+.summary[data-failed="true"] > strong { color: var(--toast-error-text); }
+.explanation { color: var(--tone-black); margin: 24px 0; line-height: 1.6; }
+.filters { border: 1px solid var(--border-strong); background: white; padding: 18px; }
+.filterControls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.search { flex: 1 1 240px; display: flex; align-items: center; position: relative; }
+.search svg { position: absolute; left: 10px; color: var(--muted-text); }
+.search input { padding: 9px 10px 9px 34px; width: 100%; }
+.search input, .filterControls select {
+  border: 1px solid var(--border-strong); background: var(--panel-surface); border-radius: 3px;
+  font-size: 12px; min-height: 36px;
+}
+.filterControls select { padding: 6px; max-width: 180px; }
+.workspace .clear { border: 0; text-decoration: underline; color: var(--tone-black); }
+.filterFooter { border-top: 1px solid var(--border-soft); padding-top: 16px; margin-top: 16px;
+  font-size: 12px; flex-wrap: wrap; }
+.filterFooter select { padding: 5px; font-weight: 600; max-width: 100%; }
+.ledger { margin-top: 24px; border: 1px solid var(--border-strong); background: white; }
+.columns { display: none; background: var(--panel-surface); color: var(--tone-black); }
+.row { display: grid; gap: 22px; padding: 24px; border-bottom: 1px solid var(--border-soft); }
+.row > div { min-width: 0; }
+.row p, .row time { font-size: 12px; color: var(--tone-black); line-height: 1.7; }
+.row p { margin-top: 4px; }
+.row strong { color: var(--charcoal); font-weight: 600; }
+.idLine { display: flex; align-items: center; gap: 5px; }
+.workspace .idLine button { border: 0; padding: 5px; background: transparent; }
+.chip { background: var(--panel-surface); padding: 2px 5px; overflow-wrap: anywhere; }
+.config > strong { font-size: 13px; overflow-wrap: anywhere; }
+.progressHeading { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+.badge { text-transform: uppercase; font-size: 10px; font-weight: 700;
+  padding: 3px 5px; background: var(--badge-surface); white-space: nowrap; }
+.badge[data-status="failed"] { color: var(--toast-error-text); background: #ffdad6; }
+.badge[data-status="queued"] { background: var(--panel-surface); }
+.row progress { appearance: none; width: 100%; height: 6px; display: block; margin: 10px 0; }
+.row progress::-webkit-progress-bar { background: var(--border-soft); border-radius: 2px; }
+.row progress::-webkit-progress-value { background: var(--charcoal); border-radius: 2px; }
+.row progress::-moz-progress-bar { background: var(--charcoal); }
+.row[data-failed="true"] { background: #fffafb; }
+.row[data-failed="true"] progress::-webkit-progress-value { background: var(--toast-error-text); }
+.row[data-failed="true"] progress::-moz-progress-bar { background: var(--toast-error-text); }
+.metrics small { display: block; font-size: 10px; color: var(--muted-text); min-height: 15px; }
+.workspace .metrics button { border: 0; padding: 8px 0 0; background: transparent; }
+.failure { grid-column: 1 / -1; display: flex; gap: 8px; font-size: 12px;
+  color: var(--toast-error-text); border-top: 1px solid #ffdad6; padding-top: 14px; }
+.pagination { padding: 16px 24px; font-size: 12px; }
+.empty { padding: 48px 24px; text-align: center; }
+.empty svg { margin: 0 auto 12px; }
+.empty h2 { font-weight: 600; }
+.empty p { margin: 8px 0 16px; color: var(--tone-black); font-size: 13px; }
+.notice { min-height: 24px; margin-top: 12px; font-size: 12px; overflow-wrap: anywhere; }
+/* On narrow screens each ledger row becomes a self-contained readable run card. */
+@media (min-width: 640px) { .row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1024px) {
+  .shell { grid-template-columns: 17.5rem minmax(0, 1fr); }
+  .workspace { padding: 40px 32px; }
+  .summaries { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+/* Four aligned columns reproduce the reference ledger when sufficient width is available. */
+@media (min-width: 1440px) {
+  .columns, .row { grid-template-columns: 1.05fr 1fr 1.25fr .8fr; gap: 24px; }
+  .columns { display: grid; padding: 12px 24px; }
+  .metrics { text-align: right; }
+  .metrics button { margin-left: auto; }
+  .workspace { padding: 48px 32px; }
+}

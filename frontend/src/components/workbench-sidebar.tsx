@@ -12,7 +12,7 @@ const navigationItems = [
   { label: "Documents", icon: FiFileText, href: "/ingestion" },
   { label: "Indexes", icon: FiDatabase, href: "/indexes" },
   { label: "Experiments", icon: FiPieChart, href: "/experiments" },
-  { label: "Runs", icon: FiGrid, href: "#" },
+  { label: "Runs", icon: FiGrid, href: "/runs" },
   { label: "Datasets", icon: FiTable, href: "/datasets" },
 ];
 
