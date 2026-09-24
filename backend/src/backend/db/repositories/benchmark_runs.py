@@ -720,19 +720,41 @@ def fail_interrupted_benchmark_runs() -> int:
     return len(rows)
 
 
+# Aggregate only one-to-one stage results: chunk joins would multiply usage counts.
+_SUMMARY_QUERY = """
+    SELECT benchmark_run.*, prepared_index.name AS prepared_index_name,
+           evaluation_dataset.name AS dataset_name, aggregates.*
+    FROM benchmark_run
+    JOIN prepared_index ON prepared_index.id = benchmark_run.prepared_index_id
+    JOIN evaluation_dataset ON evaluation_dataset.id = benchmark_run.dataset_id
+    JOIN (
+        SELECT e.benchmark_run_id,
+               SUM(e.status = 'failed') AS failed_examples,
+               SUM(e.status = 'pending') AS pending_examples,
+               SUM(e.status = 'running') AS running_examples,
+               COUNT(r.id) AS retrieval_result_count,
+               COUNT(g.id) AS generation_result_count,
+               AVG(r.duration_ms) AS average_retrieval_duration_ms,
+               AVG(g.duration_ms) AS average_generation_duration_ms,
+               SUM(g.prompt_tokens) AS prompt_tokens,
+               SUM(g.completion_tokens) AS completion_tokens,
+               COUNT(g.prompt_tokens) AS prompt_token_result_count,
+               COUNT(g.completion_tokens) AS completion_token_result_count
+        FROM benchmark_example_run e
+        LEFT JOIN benchmark_retrieval_result r ON r.example_run_id = e.id
+        LEFT JOIN benchmark_generation_result g ON g.example_run_id = e.id
+        GROUP BY e.benchmark_run_id
+    ) aggregates ON aggregates.benchmark_run_id = benchmark_run.id
+"""
+
+
 def list_benchmark_runs() -> list[dict[str, Any]]:
     """Return benchmark summaries newest first without loading question results."""
     # Join user-facing resource names so inventory clients need no extra requests.
     with connect() as connection:
         rows = connection.execute(
-            """
-            SELECT benchmark_run.*, prepared_index.name AS prepared_index_name,
-                   evaluation_dataset.name AS dataset_name
-            FROM benchmark_run
-            JOIN prepared_index ON prepared_index.id = benchmark_run.prepared_index_id
-            JOIN evaluation_dataset ON evaluation_dataset.id = benchmark_run.dataset_id
-            ORDER BY benchmark_run.created_at DESC, benchmark_run.id DESC
-            """
+            _SUMMARY_QUERY
+            + " ORDER BY benchmark_run.created_at DESC, benchmark_run.id DESC"
         ).fetchall()
 
     return [_benchmark_summary_from_row(row) for row in rows]
@@ -742,15 +764,10 @@ def get_benchmark_run(benchmark_run_id: str) -> dict[str, Any]:
     """Return one benchmark with ordered question, retrieval, and answer results."""
     # Load the aggregate and each normalized result type consistently.
     with connect() as connection:
+        # Pin summary and child reads to the same SQLite snapshot during worker writes.
+        connection.execute("BEGIN")
         run = connection.execute(
-            """
-            SELECT benchmark_run.*, prepared_index.name AS prepared_index_name,
-                   evaluation_dataset.name AS dataset_name
-            FROM benchmark_run
-            JOIN prepared_index ON prepared_index.id = benchmark_run.prepared_index_id
-            JOIN evaluation_dataset ON evaluation_dataset.id = benchmark_run.dataset_id
-            WHERE benchmark_run.id = ?
-            """,
+            _SUMMARY_QUERY + " WHERE benchmark_run.id = ?",
             (benchmark_run_id,),
         ).fetchone()
 
@@ -783,8 +800,33 @@ def get_benchmark_run(benchmark_run_id: str) -> dict[str, Any]:
 
 
 def _benchmark_summary_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    """Convert one joined benchmark row into a compact response dictionary."""
+    """Convert a joined row with aggregates into a compact public summary.
+
+    Args:
+        row: Snapshot of the run, saved configuration, and stage aggregates.
+
+    Returns:
+        Summary without question text, vectors, answers, or retrieved chunks.
+    """
     return {
+        "configuration": json.loads(row["effective_config_json"]),
+        "error": _materialize_error(row),
+        "failed_examples": row["failed_examples"],
+        "pending_examples": row["pending_examples"],
+        "running_examples": row["running_examples"],
+        "metrics": {
+            key: row[key]
+            for key in (
+                "retrieval_result_count",
+                "generation_result_count",
+                "average_retrieval_duration_ms",
+                "average_generation_duration_ms",
+                "prompt_tokens",
+                "completion_tokens",
+                "prompt_token_result_count",
+                "completion_token_result_count",
+            )
+        },
         "id": row["id"],
         "prepared_index_id": row["prepared_index_id"],
         "prepared_index_name": row["prepared_index_name"],

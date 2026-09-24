@@ -5,10 +5,11 @@ import { useState } from "react";
 import { FiAlertCircle, FiCheckCircle, FiCopy, FiDownload, FiInfo } from "react-icons/fi";
 import { FiActivity, FiSearch, FiTerminal, FiArrowRight } from "react-icons/fi";
 import WorkbenchSidebar from "@/components/workbench-sidebar";
-import { PREVIEW_DATE, RUN_PREVIEWS, type RunPreview } from "@/lib/run-preview-data";
+import { presentRun, type RunPresentation } from "@/lib/run-presentation";
+import { useRunHistory } from "@/lib/use-run-history";
 import styles from "./runs-workbench.module.css";
 
-// Four entries preserve the reference's readable row density and demonstrate pagination.
+// Four entries preserve the reference's readable row density on each page.
 const PAGE_SIZE = 4;
 
 /** Format nullable seconds for an execution duration; returns a human-readable label. */
@@ -25,8 +26,8 @@ function tokens(value: number | null): string {
   }).format(value);
 }
 
-/** Render one fixture and call onCopy with its full ID; returns an execution ledger row. */
-function RunRow({ run, onCopy }: { run: RunPreview; onCopy: (id: string) => void }) {
+/** Render a validated run and call onCopy with its full ID; returns an execution ledger row. */
+function RunRow({ run, onCopy }: { run: RunPresentation; onCopy: (id: string) => void }) {
   const percent = Math.round(run.completed / run.total * 100);
   return (
     <article className={styles.row} data-failed={run.status === "failed"}>
@@ -79,24 +80,30 @@ function RunRow({ run, onCopy }: { run: RunPreview; onCopy: (id: string) => void
           <strong>{duration(run.seconds)}</strong>
         </p>
         <p>
-          {run.status === "running" ? "Generating answer" :
+          {run.status === "running" ? (run.source.current_stage ?? "Starting execution") :
             run.status === "queued" ? "Execution not started" :
-              run.status === "failed" ? "Stopped during generation" : "All questions completed"}
+              run.status === "failed" ?
+                `Stopped: ${run.source.error?.stage ?? "execution"}` : "All questions completed"}
         </p>
       </div>
-      {/* Stage averages and token usage cover only recorded fixture results. */}
+      {/* Stage averages exclude failed attempts; counts expose coverage of saved results. */}
       <div className={styles.metrics}>
         <p>
-          Avg retrieval: {run.retrievalMs === null ? "—" : `${run.retrievalMs}ms`}
+          Avg retrieval: {run.retrievalMs === null ? "—" : `${run.retrievalMs.toFixed(1)}ms`}
+          {" "}({run.source.metrics.retrieval_result_count} results)
         </p>
         <p>
-          Avg generation: {run.generationMs === null ? "—" : `${run.generationMs / 1000}s`}
+          Avg generation: {run.generationMs === null ? "—" :
+            `${(run.generationMs / 1000).toFixed(2)}s`}
+          {" "}({run.source.metrics.generation_result_count} results)
         </p>
         <p>
           Tokens: {tokens(run.inputTokens)} in / {tokens(run.outputTokens)} out
         </p>
         <small>
-          {run.status === "running" || run.status === "failed" ? "Recorded results only" : " "}
+          Usage reported: {run.source.metrics.prompt_token_result_count} input /{" "}
+          {run.source.metrics.completion_token_result_count} output of{" "}
+          {run.source.metrics.generation_result_count} saved generations
         </small>
         <button disabled title="Run details will be available in a later update">
           View run <FiArrowRight aria-hidden="true" />
@@ -107,8 +114,9 @@ function RunRow({ run, onCopy }: { run: RunPreview; onCopy: (id: string) => void
         <div className={styles.failure}>
           <FiAlertCircle aria-hidden="true" />
           <span>
-            Generation failed: the provider request timed out. Partial results saved.
-            {" "}{run.total - run.completed - 1} questions were not executed after one failed.
+            {run.source.error?.message ?? "Execution failed."}
+            {" "}({run.source.error?.code ?? "unknown_error"}). Partial results saved.
+            {" "}{run.source.failed_examples} failed; {run.source.pending_examples} not executed.
           </span>
         </div>
       )}
@@ -116,15 +124,18 @@ function RunRow({ run, onCopy }: { run: RunPreview; onCopy: (id: string) => void
   );
 }
 
-/** Render the local runs preview with filtering and export; takes no parameters. */
+/** Render API-backed history with local filters and export; takes no parameters. */
 export default function RunsWorkbench() {
+  // Own live inventory, refresh feedback and a local elapsed-time clock.
+  const { runs: snapshots, loading, error, now, retry } = useRunHistory();
+
   // Search matches user-visible identity and target fields without a network request.
   const [search, setSearch] = useState("");
 
   // Filter values are local presentation state, not backend configuration.
   const [filters, setFilters] = useState({ status: "", index: "", dataset: "", days: "" });
 
-  // Sorting applies to all matching fixtures before pagination.
+  // Sorting applies to all matching runs before pagination.
   const [sort, setSort] = useState("newest");
 
   // Pagination keeps the ledger short while preserving all matching runs.
@@ -133,33 +144,87 @@ export default function RunsWorkbench() {
   // Clipboard and export feedback is announced to assistive technology.
   const [notice, setNotice] = useState("");
 
-  const filtered = RUN_PREVIEWS.filter((run) => {
-    // Combine every selected filter; fixture dates are relative to the preview reference day.
-    const age = (Date.parse(PREVIEW_DATE) - Date.parse(run.created.slice(0, 10))) / 86400000;
-    return `${run.id} ${run.index} ${run.dataset}`.toLowerCase().includes(search.toLowerCase())
-      && (!filters.status || run.status === filters.status)
-      && (!filters.index || run.index === filters.index)
-      && (!filters.dataset || run.dataset === filters.dataset)
-      && (!filters.days || age < Number(filters.days));
-  }).sort((a, b) => {
-    // Unknown durations stay last regardless of the selected duration ordering.
-    if (sort === "duration") return (b.seconds ?? -1) - (a.seconds ?? -1);
-    return sort === "oldest" ? a.created.localeCompare(b.created) :
-      b.created.localeCompare(a.created);
-  });
+  // Convert each API snapshot into row labels, including elapsed time using the local `now` clock.
+  const runs = snapshots.map((run) => presentRun(run, now));
+
+  // Keep only rows matching every filter, then sort that new array without modifying `runs`.
+  const filtered = runs
+    .filter((run) => {
+      // Age is fractional days since creation: 86,400,000 milliseconds equals one 24-hour day.
+      const age = (now - Date.parse(run.created)) / 86400000;
+
+      return (
+        // Search across the run ID, index name and dataset name, ignoring letter case.
+        `${run.id} ${run.index} ${run.dataset}`.toLowerCase().includes(search.toLowerCase())
+        // An empty status means any status; otherwise require the selected display status.
+        && (!filters.status || run.status === filters.status)
+        // Match the stable index ID, since different indexes can share the same name.
+        && (!filters.index || run.indexId === filters.index)
+        // Match the stable dataset ID for the same reason; an empty value allows all datasets.
+        && (!filters.dataset || run.datasetId === filters.dataset)
+        // Convert the selected day count from its select-input string before comparing ages.
+        && (!filters.days || age < Number(filters.days))
+      );
+    })
+    .sort((a, b) => {
+      // `a` and `b` are two candidate rows. A negative result places `a` before `b`.
+      // Subtract in reverse order for longest-first; null becomes -1, below even zero seconds.
+      if (sort === "duration") {
+        return (b.seconds ?? -1) - (a.seconds ?? -1);
+      }
+
+      // Compare backend UTC timestamps oldest-first, or reverse them for newest-first.
+      return sort === "oldest"
+        ? a.created.localeCompare(b.created)
+        : b.created.localeCompare(a.created);
+    });
+
+  // Round up to include a partially filled last page; show page 1 even when no rows match.
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const visible = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-  const running = RUN_PREVIEWS.filter((run) => run.status === "running").length;
-  const queued = RUN_PREVIEWS.filter((run) => run.status === "queued").length;
+
+  // Clamp the selected page when refreshed data or filters leave fewer pages available.
+  const currentPage = Math.min(page, pageCount);
+
+  // Convert the one-based page to zero-based slice bounds; the ending bound is exclusive.
+  const visible = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+
+  // Count executing runs across the full inventory, not just filtered or visible rows.
+  const running = runs.filter((run) => run.status === "running").length;
+
+  // Count runs waiting for execution; `presentRun` maps backend `pending` to UI `queued`.
+  const queued = runs.filter((run) => run.status === "queued").length;
+
+  // Card descriptors: `label` is the heading, `count` the value, `note` the explanation,
+  // and `icon` the React icon component. All counts describe the full loaded inventory.
   const summaries = [
-    { label: "Total runs", count: RUN_PREVIEWS.length, note: "All preview benchmarks",
-      icon: FiTerminal },
-    { label: "Active runs", count: running + queued, note: `${running} running · ${queued} queued`,
-      icon: FiActivity },
-    { label: "Completed runs", count: RUN_PREVIEWS.filter((r) => r.status === "completed").length,
-      note: "Finished without execution errors", icon: FiCheckCircle },
-    { label: "Failed runs", count: RUN_PREVIEWS.filter((r) => r.status === "failed").length,
-      note: "Stopped before all questions finished", icon: FiAlertCircle },
+    // Include every saved run regardless of its lifecycle state.
+    {
+      label: "Total runs",
+      count: runs.length,
+      note: "All saved benchmarks",
+      icon: FiTerminal,
+    },
+    // Active includes both currently executing and waiting work; the note separates them.
+    {
+      label: "Active runs",
+      count: running + queued,
+      note: `${running} running · ${queued} queued`,
+      icon: FiActivity,
+    },
+    // Completed measures successful execution, not evaluated answer quality.
+    {
+      label: "Completed runs",
+      count: runs.filter((run) => run.status === "completed").length,
+      note: "Finished without execution errors",
+      icon: FiCheckCircle,
+    },
+    // Failed runs can still contain saved results from questions completed before the error.
+    {
+      label: "Failed runs",
+      count: runs.filter((run) => run.status === "failed").length,
+      note: "Stopped before all questions finished",
+      icon: FiAlertCircle,
+    },
   ];
 
   /** Reset all filter inputs and pagination; returns nothing. */
@@ -175,23 +240,24 @@ export default function RunsWorkbench() {
       await navigator.clipboard.writeText(id);
       setNotice("Run ID copied.");
     } catch {
-      // Clipboard access can be denied even when the rest of the preview works.
+      // Clipboard access can be denied independently of run-history access.
       setNotice(`Unable to copy. Run ID: ${id}`);
     }
   }
 
-  /** Download filtered sample runs as JSON; returns nothing and never contacts the backend. */
+  /** Download filtered API summaries as JSON; returns nothing without fetching detail payloads. */
   function exportRuns() {
-    const url = URL.createObjectURL(new Blob([JSON.stringify(filtered, null, 2)], {
+    const data = filtered.map((run) => run.source);
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], {
       type: "application/json",
     }));
     const link = document.createElement("a");
     link.href = url;
-    link.download = "runs-preview.json";
+    link.download = "runs.json";
     link.click();
     // Release the object URL after the browser has started the download.
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setNotice(`Exported ${filtered.length} sample runs.`);
+    setNotice(`Exported ${filtered.length} run summaries.`);
   }
 
   return (
@@ -210,7 +276,7 @@ export default function RunsWorkbench() {
             </p>
           </div>
           <div className={styles.actions}>
-            <button onClick={exportRuns}>
+            <button onClick={exportRuns} disabled={loading || filtered.length === 0}>
               <FiDownload aria-hidden="true" /> Export
             </button>
             <Link href="/experiments" className={styles.primary}>
@@ -218,12 +284,17 @@ export default function RunsWorkbench() {
             </Link>
           </div>
         </header>
-        {/* Preview disclosure prevents fixture status from appearing to be live execution. */}
-        <div className={styles.preview}>
-          <FiInfo aria-hidden="true" />
-          Sample data · Preview as of September 20, 2026. Backend and run details are not connected.
-        </div>
-        {/* Summary counts always cover the complete sample inventory, independent of filters. */}
+        {/* Refresh failures preserve prior rows and offer an immediate retry. */}
+        {error && (
+          <div className={styles.preview} role="alert">
+            <FiAlertCircle aria-hidden="true" />
+            {error}
+            <button onClick={retry}>
+              Retry
+            </button>
+          </div>
+        )}
+        {/* Summary counts cover the complete loaded inventory, independent of filters. */}
         <div className={styles.summaries}>
           {summaries.map(({ label, count, note, icon: Icon }) => (
             <section key={label} className={styles.summary} data-failed={label === "Failed runs"}>
@@ -234,7 +305,7 @@ export default function RunsWorkbench() {
                 <Icon aria-hidden="true" />
               </div>
               <strong>
-                {count}
+                {loading || (error && snapshots.length === 0) ? "—" : count}
               </strong>
               <p>
                 {note}
@@ -245,9 +316,9 @@ export default function RunsWorkbench() {
         <p className={styles.explanation}>
           <FiInfo aria-hidden="true" />
           Counts reflect execution status, not answer quality.
-          Summary counts include all sample runs.
+          Summary counts include all saved runs. History refreshes automatically.
         </p>
-        {/* Search, independent filters, and sorting operate on local fixtures only. */}
+        {/* Search, independent filters, and sorting operate on the loaded summaries. */}
         <section className={styles.filters} aria-label="Filter runs">
           <div className={styles.filterControls}>
             <label className={styles.search}>
@@ -269,9 +340,15 @@ export default function RunsWorkbench() {
                 </option>
                 {(key === "status" ? ["running", "queued", "completed", "failed"] :
                   key === "days" ? ["1", "7", "30"] :
-                    [...new Set(RUN_PREVIEWS.map((run) => run[key]))]).map((value) => (
+                    [...new Set(runs.map((run) =>
+                      key === "index" ? run.indexId : run.datasetId))]).map((value) => (
                   <option key={value} value={value}>
-                    {key === "days" ? `Last ${value} days` : value}
+                    {key === "days" ? `Last ${value} days` : key === "index" ?
+                      `${runs.find((r) => r.indexId === value)?.index} (${value.slice(0, 8)})` :
+                      key === "dataset" ?
+                        `${runs.find((r) => r.datasetId === value)?.dataset}` +
+                          ` (${value.slice(0, 8)})` :
+                        value}
                   </option>
                 ))}
               </select>
@@ -319,10 +396,14 @@ export default function RunsWorkbench() {
             <div className={styles.empty}>
               <FiSearch aria-hidden="true" />
               <h2>
-                No matching runs
+                {loading ? "Loading runs…" : error && !runs.length ? "History unavailable" :
+                  runs.length === 0 ? "No runs yet" : "No matching runs"}
               </h2>
               <p>
-                Try another search or clear your filters to see all sample runs.
+                {loading ? "Fetching saved benchmarks." : error && !runs.length ?
+                  "Use Retry above to load your history." : runs.length === 0 ?
+                  "Launch a benchmark from Experiments to see it here." :
+                  "Try another search or clear your filters."}
               </p>
               <button onClick={clearFilters}>
                 Clear filters
@@ -331,13 +412,13 @@ export default function RunsWorkbench() {
           )}
           <footer className={styles.pagination}>
             <span>
-              Page {page} of {pageCount}
+              Page {currentPage} of {pageCount}
             </span>
             <div className={styles.actions}>
-              <button disabled={page === 1} onClick={() => setPage(page - 1)}>
+              <button disabled={currentPage === 1} onClick={() => setPage(currentPage - 1)}>
                 Previous
               </button>
-              <button disabled={page >= pageCount} onClick={() => setPage(page + 1)}>
+              <button disabled={currentPage >= pageCount} onClick={() => setPage(currentPage + 1)}>
                 Next
               </button>
             </div>

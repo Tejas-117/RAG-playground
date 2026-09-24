@@ -2,12 +2,14 @@
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from backend.api.routers.runs import (
@@ -15,11 +17,13 @@ from backend.api.routers.runs import (
     BenchmarkRunResponse,
     _add_benchmark_stage_statuses,
     create_benchmark_run,
+    read_benchmark_runs,
 )
 from backend.db.connection import connect
 from backend.db.repositories.benchmark_runs import (
     BenchmarkInputMismatchError,
     create_pending_benchmark_run,
+    list_benchmark_runs,
     resolve_benchmark_configuration,
 )
 from backend.db.repositories.work_queue import claim_next_pending_work_item
@@ -243,7 +247,118 @@ def test_benchmark_reuses_ready_index_for_all_dataset_examples() -> None:
         )
         assert response.examples[0].generation is not None
 
+        # List results retain successful-stage coverage without hydrating questions.
+        summary = list_benchmark_runs()[0]
+        assert "examples" not in summary
+        assert summary["configuration"] == completed["configuration"]
+        assert summary["metrics"]["retrieval_result_count"] == 2
+        assert summary["metrics"]["generation_result_count"] == 2
+        assert summary["metrics"]["prompt_tokens"] is None
+        assert summary["metrics"]["prompt_token_result_count"] == 0
+
+        # Mixed unknown and genuine zero usage must remain distinguishable.
+        with connect() as connection:
+            connection.execute(
+                """UPDATE benchmark_generation_result
+                   SET prompt_tokens = 0, completion_tokens = 7, duration_ms = 20
+                   WHERE example_run_id = ?""",
+                (completed["examples"][0]["id"],),
+            )
+            connection.execute(
+                """UPDATE benchmark_generation_result SET duration_ms = 40
+                   WHERE example_run_id = ?""",
+                (completed["examples"][1]["id"],),
+            )
+        metrics = list_benchmark_runs()[0]["metrics"]
+        assert metrics["prompt_tokens"] == 0
+        assert metrics["completion_tokens"] == 7
+        assert metrics["prompt_token_result_count"] == 1
+        assert metrics["completion_token_result_count"] == 1
+        assert metrics["average_generation_duration_ms"] == 30
+
+        # Simulate a generation failure after retrieval: its retrieval still counts.
+        with connect() as connection:
+            connection.execute(
+                "DELETE FROM benchmark_generation_result WHERE example_run_id = ?",
+                (completed["examples"][1]["id"],),
+            )
+            connection.execute(
+                "UPDATE benchmark_example_run SET status = 'failed' WHERE id = ?",
+                (completed["examples"][1]["id"],),
+            )
+            connection.execute(
+                "UPDATE benchmark_run SET status = 'failed', completed_examples = 1 WHERE id = ?",
+                (completed["id"],),
+            )
+        partial = list_benchmark_runs()[0]
+        assert partial["failed_examples"] == 1
+        assert partial["completed_examples"] == 1
+        assert partial["metrics"]["retrieval_result_count"] == 2
+        assert partial["metrics"]["generation_result_count"] == 1
+        assert partial["metrics"]["average_generation_duration_ms"] == 20
+
     database_directory.cleanup()
+
+
+@pytest.mark.parametrize("run_status", ["pending", "running", "failed"])
+def test_history_summary_preserves_lifecycle_and_error(
+    tmp_path: Path, run_status: str
+) -> None:
+    """Use isolated inputs and a lifecycle value to verify compact API summaries."""
+    with patch("backend.db.connection.DATABASE_PATH", tmp_path / "history.sqlite3"):
+        assert asyncio.run(read_benchmark_runs()) == []
+        _seed_ready_inputs()
+        _, _, config = resolve_benchmark_configuration(
+            "prepared-index-1", "dataset-1", _experiment_configuration()
+        )
+        run = create_pending_benchmark_run("prepared-index-1", "dataset-1", config)
+        # Simulate worker state without making any provider requests.
+        with connect() as connection:
+            connection.execute(
+                "UPDATE benchmark_run SET status = ? WHERE id = ?",
+                (run_status, run["id"]),
+            )
+            connection.execute(
+                "UPDATE benchmark_example_run SET status = ? WHERE id = ?",
+                (run_status, run["examples"][0]["id"]),
+            )
+            # Failed parents retain safe errors independently of child progress counts.
+            if run_status == "failed":
+                connection.execute(
+                    """UPDATE benchmark_run SET error_code = 'generation_request_timeout',
+                       error_details_json = ? WHERE id = ?""",
+                    (
+                        json.dumps({"message": "Timed out", "stage": "generation"}),
+                        run["id"],
+                    ),
+                )
+        summary = asyncio.run(read_benchmark_runs())[0]
+        assert summary.configuration == config
+        assert summary.pending_examples == (2 if run_status == "pending" else 1)
+        assert summary.running_examples == int(run_status == "running")
+        assert summary.failed_examples == int(run_status == "failed")
+        assert summary.metrics.average_retrieval_duration_ms is None
+        assert summary.metrics.prompt_tokens is None
+        # Serialize the public error only for failed runs.
+        if run_status == "failed":
+            assert summary.error is not None
+            assert summary.error.code == "generation_request_timeout"
+        else:
+            assert summary.error is None
+
+
+def test_history_api_returns_structured_persistence_error() -> None:
+    """A database failure returns a safe HTTP error rather than raw SQLite details."""
+    with (
+        patch(
+            "backend.api.routers.runs.list_benchmark_runs",
+            side_effect=sqlite3.OperationalError,
+        ),
+        pytest.raises(HTTPException) as captured,
+    ):
+        asyncio.run(read_benchmark_runs())
+    assert captured.value.status_code == 500
+    assert captured.value.detail["code"] == "persistence_error"
 
 
 def test_benchmark_rejects_dataset_from_another_corpus() -> None:

@@ -3,7 +3,15 @@ import {
   type BenchmarkRunCreateRequest,
   type BenchmarkRunLaunch,
   parseBenchmarkRunLaunch,
+  parseBenchmarkRuns,
+  type BenchmarkRunSummary,
 } from "@/validation/benchmark-runs";
+
+/** Fetch validated history; optional signal cancels the request on hide or unmount. */
+export async function listBenchmarkRuns(signal?: AbortSignal): Promise<BenchmarkRunSummary[]> {
+  const response = await apiClient.get<unknown>("/runs", { signal });
+  return parseBenchmarkRuns(response.data);
+}
 
 /**
  * Enqueue one dataset-wide benchmark against a ready prepared index.

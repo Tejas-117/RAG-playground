@@ -216,6 +216,19 @@ class BenchmarkExampleResponse(BaseModel):
     error: RunErrorResponse | None = None
 
 
+class BenchmarkRunMetricsResponse(BaseModel):
+    """Expose successful stage averages and nullable usage with coverage counts."""
+
+    retrieval_result_count: int = Field(ge=0)
+    generation_result_count: int = Field(ge=0)
+    average_retrieval_duration_ms: float | None = Field(ge=0)
+    average_generation_duration_ms: float | None = Field(ge=0)
+    prompt_tokens: int | None = Field(ge=0)
+    completion_tokens: int | None = Field(ge=0)
+    prompt_token_result_count: int = Field(ge=0)
+    completion_token_result_count: int = Field(ge=0)
+
+
 class BenchmarkRunSummaryResponse(BaseModel):
     """Represent one dataset-wide run without loading question-level output."""
 
@@ -231,6 +244,12 @@ class BenchmarkRunSummaryResponse(BaseModel):
     current_example_id: str | None = None
     total_examples: int = Field(gt=0)
     completed_examples: int = Field(ge=0)
+    failed_examples: int = Field(ge=0)
+    pending_examples: int = Field(ge=0)
+    running_examples: int = Field(ge=0)
+    configuration: PipelineConfig
+    error: RunErrorResponse | None = None
+    metrics: BenchmarkRunMetricsResponse
     created_at: str
     started_at: str | None = None
     completed_at: str | None = None

@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /** The effective pipeline configuration accepted and returned by the runs API. */
-const pipelineConfigurationSchema = z.object({
+export const pipelineConfigurationSchema = z.object({
   chunking: z.object({
     strategy: z.string().min(1),
     chunk_size_tokens: z.number().int().positive(),

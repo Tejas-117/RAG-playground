@@ -1,4 +1,11 @@
 import { z } from "zod";
+import { pipelineConfigurationSchema } from "@/validation/runs";
+
+/** Nonnegative measurements preserve zero while nullable fields preserve missing data. */
+const countSchema = z.number().int().nonnegative();
+
+/** Validate timestamps before they are used for date filters and elapsed time. */
+const timestampSchema = z.string().datetime({ offset: true });
 
 /** Runtime contract for the persisted benchmark returned immediately after launch. */
 const benchmarkRunLaunchSchema = z.object({
@@ -14,6 +21,47 @@ const benchmarkRunLaunchSchema = z.object({
   completed_examples: z.number().int().nonnegative(),
   created_at: z.string().min(1),
 });
+
+/** Compact history contract; no question text or retrieved chunks are downloaded. */
+const benchmarkRunSummarySchema = benchmarkRunLaunchSchema.extend({
+  created_at: timestampSchema,
+  started_at: timestampSchema.nullable(),
+  completed_at: timestampSchema.nullable(),
+  duration_ms: countSchema.nullable(),
+  current_stage: z.enum(["retrieval", "generation"]).nullable(),
+  current_example_id: z.string().nullable(),
+  failed_examples: countSchema,
+  pending_examples: countSchema,
+  running_examples: countSchema,
+  configuration: pipelineConfigurationSchema,
+  error: z.object({
+    code: z.string(),
+    message: z.string(),
+    stage: z.enum(["chunking", "embedding", "retrieval", "generation"]).nullable(),
+    details: z.record(z.string(), z.unknown()),
+  }).nullable(),
+  metrics: z.object({
+    retrieval_result_count: countSchema,
+    generation_result_count: countSchema,
+    average_retrieval_duration_ms: z.number().nonnegative().nullable(),
+    average_generation_duration_ms: z.number().nonnegative().nullable(),
+    prompt_tokens: countSchema.nullable(),
+    completion_tokens: countSchema.nullable(),
+    prompt_token_result_count: countSchema,
+    completion_token_result_count: countSchema,
+  }),
+});
+
+/** Validated summary used by history, filters, and export. */
+export type BenchmarkRunSummary = z.infer<typeof benchmarkRunSummarySchema>;
+
+/** Validate an unknown GET /runs body; returns summaries or throws a safe error. */
+export function parseBenchmarkRuns(value: unknown): BenchmarkRunSummary[] {
+  const result = z.array(benchmarkRunSummarySchema).safeParse(value);
+  // Reject the entire snapshot instead of displaying partially validated history.
+  if (!result.success) throw new Error("The backend returned invalid run history.");
+  return result.data;
+}
 
 /** Query-time configuration accepted when launching a saved-dataset benchmark. */
 export type BenchmarkRunCreateRequest = {

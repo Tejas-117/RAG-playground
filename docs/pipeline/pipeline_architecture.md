@@ -324,6 +324,37 @@ At this implementation stage, `completed` means retrieval and generation finishe
 for every dataset example. `current_stage`, `current_example_id`, and completed
 counts expose progress without inventing percentages. `GET /runs` returns compact
 history and `GET /runs/{run_id}` returns question-level rankings and answers.
+The list remains a newest-first JSON array. Each summary includes the saved
+`configuration`, safe structured `error`, `failed_examples`, `pending_examples`,
+and `running_examples`, alongside the existing completed and total counts.
+No schema migration is needed: these values come from persisted runs and results.
+
+The summary `metrics` object contains `retrieval_result_count`,
+`generation_result_count`, `average_retrieval_duration_ms`,
+`average_generation_duration_ms`, `prompt_tokens`, `completion_tokens`,
+`prompt_token_result_count`, and `completion_token_result_count`.
+Averages cover successfully persisted stage results, not failed requests. Usage
+is summed only where reported; coverage counts identify partial usage. Missing
+measurements are `null`, not zero. A real reported zero stays zero. Grouped SQL
+joins only one result per example and never joins ranked chunk rows, preventing
+multiplied counts. List fields share one query snapshot; detail reads use a read
+transaction so the summary and children are consistent during worker updates.
+
+The `/runs` frontend validates this contract and displays actual configuration,
+progress, errors, stage averages, and token coverage. `pending` is labelled
+Queued. Filters use stable index/dataset IDs; search, sorting, pagination and
+JSON summary export operate locally over the loaded inventory. Summary cards
+always cover all loaded runs. Completed execution does not mean evaluated:
+evaluation remains “Not evaluated”. Run-detail navigation is disabled until its
+page is implemented.
+
+History loads on mount, then refreshes sequentially every 2 seconds with active
+runs or 15 seconds when idle. Requests pause in hidden tabs, resume immediately
+on visibility, and are cancelled on unmount. Running elapsed time uses a local
+clock; terminal duration uses persisted milliseconds. Refresh failures preserve
+the last valid inventory with a warning and Retry action. Initial loading,
+unavailable history, empty inventory and no-filter-match states are distinct.
+
 If one example fails, earlier completed outputs remain inspectable while the parent
 run and active child receive the same safe structured failure.
 
