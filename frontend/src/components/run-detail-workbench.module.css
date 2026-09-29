@@ -1,0 +1,264 @@
+/* The same quiet workbench palette as /runs frames a denser inspection console. */
+.shell {
+  display: grid;
+  min-height: 100vh;
+  color: var(--charcoal);
+}
+
+.workspace {
+  min-width: 0;
+  padding: 24px;
+}
+
+.workspace :is(button, a, input, summary):focus-visible {
+  outline: 2px solid var(--charcoal);
+  outline-offset: 3px;
+}
+
+.preview {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 20px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-surface);
+  color: var(--tone-black);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.preview svg { flex: none; margin-top: 1px; }
+.preview code { color: var(--charcoal); overflow-wrap: anywhere; }
+
+.header {
+  padding: 20px 22px;
+  border: 1px solid var(--border-strong);
+  background: var(--white);
+}
+
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 17px;
+  font-size: 12px;
+  color: var(--tone-black);
+}
+
+.back:hover { color: var(--charcoal); text-decoration: underline; }
+.headerMain { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.header h1 { font-size: clamp(24px, 3vw, 33px); font-weight: 650; letter-spacing: -.03em; }
+.titleLine { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.titleLine h1 { overflow-wrap: anywhere; }
+.titleLine button { display: inline-flex; padding: 6px; cursor: pointer; }
+.titleLine button:hover { background: var(--panel-surface); }
+
+.eyebrow {
+  display: block;
+  color: var(--tone-black);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  background: var(--panel-surface);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.statusDot { width: 7px; height: 7px; background: var(--charcoal); border-radius: 50%; }
+
+.identity {
+  display: flex;
+  align-items: center;
+  gap: 8px 18px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  color: var(--tone-black);
+  font-size: 12px;
+}
+
+.identity code,
+.mono,
+.sectionMeta,
+.provenance,
+.configIds,
+.questionItemFoot,
+.footer {
+  font-family: var(--font-geist-mono), monospace;
+}
+
+
+/* Four aligned summary cells retain the Stitch hierarchy without unsupported controls. */
+.metrics { display: grid; gap: 12px; margin: 14px 0; }
+.metricCard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  min-height: 155px;
+  padding: 16px;
+  border: 1px solid var(--border-soft);
+  background: var(--white);
+}
+
+.metricCard > strong { font-size: 26px; font-weight: 630; letter-spacing: -.04em; }
+.metricCard strong small { font-size: 13px; font-weight: 450; color: var(--tone-black); }
+.metricCard p { margin-top: auto; font-size: 11px; color: var(--tone-black); }
+.metricCard progress { width: 100%; height: 7px; accent-color: var(--charcoal); }
+.pairedMetrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.pairedMetrics div { display: flex; flex-direction: column; gap: 4px; }
+.pairedMetrics strong { font-size: 20px; font-weight: 630; }
+.pairedMetrics span { font-size: 11px; color: var(--tone-black); }
+.metricCard .evaluationState { font-size: 18px; letter-spacing: 0; }
+
+/* The configuration strip reads in execution order and opens natively from its summary. */
+.configuration { margin-bottom: 14px; border: 1px solid var(--border-soft); background: white; }
+.configuration summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 13px 16px;
+  background: var(--panel-surface);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style-position: inside;
+}
+
+.configuration summary span {
+  margin-left: auto;
+  color: var(--tone-black);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.configurationGrid { display: grid; gap: 1px; background: var(--border-soft); }
+.configurationGrid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 14px;
+  background: var(--white);
+}
+
+.configurationGrid b { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.configurationGrid span { font-size: 12px; color: var(--tone-black); overflow-wrap: anywhere; }
+.configIds {
+  padding: 9px 14px;
+  color: var(--tone-black);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+/* The selected question's dark left rule is the page's signature inspection marker. */
+.questionGrid { display: grid; gap: 14px; align-items: start; }
+.navigator { min-width: 0; border: 1px solid var(--border-soft); background: white; }
+.navigatorHead { padding: 14px; background: var(--panel-surface); }
+.navigatorTitle { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.navigatorTitle h2 { font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; }
+.navigatorTitle span { color: var(--tone-black); font-size: 11px; }
+.search { display: flex; align-items: center; gap: 7px; padding: 8px;
+  border: 1px solid var(--border-strong); background: white; }
+.search svg { color: var(--tone-black); flex: none; }
+.search input { width: 100%; min-width: 0; outline: none; font-size: 12px; }
+.filterBar { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+.filterBar button { padding: 5px 7px; background: var(--white); color: var(--tone-black);
+  font-size: 10px; cursor: pointer; }
+.filterBar button[aria-pressed="true"] { background: var(--charcoal); color: var(--white); }
+.questionList { max-height: 720px; overflow: auto; }
+.questionItem {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 7px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  border-left: 4px solid transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.questionItem:hover { background: var(--page-surface); }
+.questionItem[data-selected="true"] { border-left-color: var(--charcoal);
+  background: var(--hover-surface); }
+.questionItemTop { display: flex; align-items: center; justify-content: space-between; gap: 7px;
+  font-size: 11px; }
+.questionItemTop b { margin-right: auto; font-family: var(--font-geist-mono), monospace; }
+.questionItemTop > span:nth-child(2) { color: var(--tone-black); }
+.questionStatus { padding: 3px 5px; background: var(--panel-surface); font-size: 9px;
+  font-weight: 700; text-transform: uppercase; }
+.questionStatus[data-status="running"] { background: var(--charcoal); color: white; }
+.questionStatus[data-status="failed"] { background: var(--toast-error-surface);
+  color: var(--toast-error-text); }
+.questionItemText { font-size: 12px; font-weight: 550; line-height: 1.45; }
+.questionItemFoot { color: var(--tone-black); font-size: 10px; line-height: 1.4; }
+.noMatch { padding: 28px 14px; color: var(--tone-black); font-size: 12px; }
+
+.inspector { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.panel { min-width: 0; padding: 16px; border: 1px solid var(--border-soft); background: white; }
+.panelHead { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  flex-wrap: wrap; margin: -16px -16px 16px; padding: 12px 16px; background: var(--panel-surface); }
+.panelHead h2 { font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; }
+.panelHead > span { color: var(--tone-black); font-size: 11px; overflow-wrap: anywhere; }
+.questionText { margin-bottom: 16px; font-size: 17px; font-weight: 620; line-height: 1.4; }
+.reference { padding: 13px; background: var(--panel-surface); }
+.reference p { margin-top: 7px; font-size: 13px; line-height: 1.55; }
+.answer { padding: 14px; background: var(--page-surface); font-size: 14px; line-height: 1.65; }
+.pendingMessage { padding: 22px 14px; background: var(--page-surface); color: var(--tone-black);
+  font-size: 13px; line-height: 1.55; }
+.provenanceLine { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 14px;
+  color: var(--tone-black); font-size: 11px; }
+.distanceNote { margin-bottom: 14px; color: var(--tone-black); font-size: 11px; line-height: 1.55; }
+.chunkList { display: flex; flex-direction: column; gap: 9px; }
+.chunk { padding: 12px; background: var(--panel-surface); }
+.chunkHead { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; font-size: 11px; }
+.rank { padding: 4px 6px; background: var(--charcoal); color: white; font-size: 10px; }
+.contextBadge { padding: 4px 6px; background: var(--white); font-size: 10px; font-weight: 650; }
+.chunkSource { display: flex; align-items: center; gap: 5px; margin: 12px 0 8px;
+  color: var(--tone-black); font-size: 11px; flex-wrap: wrap; }
+.chunkSource svg { flex: none; }
+.chunkText { padding: 10px; background: white; font-size: 12px; line-height: 1.6; }
+.chunkDetails { margin-top: 10px; color: var(--tone-black); font-size: 11px; }
+.chunkDetails summary { cursor: pointer; width: fit-content; }
+.provenance { display: grid; gap: 6px; margin-top: 10px; font-size: 10px; }
+.provenance div { display: flex; flex-wrap: wrap; gap: 3px 10px; }
+.provenance dt { min-width: 110px; color: var(--tone-black); }
+.provenance dd { overflow-wrap: anywhere; color: var(--charcoal); }
+.srNotice { min-height: 20px; margin-top: 12px; font-size: 11px; }
+.srNotice svg { display: inline; margin-right: 5px; }
+.footer { display: flex; align-items: center; gap: 6px; margin: 15px 0;
+  color: var(--tone-black); font-size: 10px; }
+
+@media (min-width: 700px) {
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .configurationGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (min-width: 1024px) {
+  .shell { grid-template-columns: 17.5rem minmax(0, 1fr); }
+  .workspace { padding: 28px 32px; }
+}
+
+@media (min-width: 1200px) {
+  .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .configurationGrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .questionGrid { grid-template-columns: minmax(300px, 1fr) minmax(0, 2fr); }
+  .navigator { position: sticky; top: 14px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .questionItem,
+  .filterBar button { transition: none; }
+}

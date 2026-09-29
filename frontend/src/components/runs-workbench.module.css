@@ -1,6 +1,6 @@
 /* Inherit the existing workbench palette and type; the ledger is the page's focal point. */
 .shell { display: grid; min-height: 100vh; color: var(--charcoal); }
-.workspace { min-width: 0; padding: 36px 24px; background: var(--page-surface); }
+.workspace { min-width: 0; padding: 36px 24px; }
 .header, .actions, .summary > div, .filterFooter, .pagination {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
 }

@@ -5,6 +5,7 @@ import { useState } from "react";
 import { FiAlertCircle, FiCheckCircle, FiCopy, FiDownload, FiInfo } from "react-icons/fi";
 import { FiActivity, FiSearch, FiTerminal, FiArrowRight } from "react-icons/fi";
 import WorkbenchSidebar from "@/components/workbench-sidebar";
+import WorkbenchGridCanvas from "@/components/workbench-grid-canvas";
 import { presentRun, type RunPresentation } from "@/lib/run-presentation";
 import { useRunHistory } from "@/lib/use-run-history";
 import styles from "./runs-workbench.module.css";
@@ -264,7 +265,7 @@ export default function RunsWorkbench() {
     <main className={styles.shell}>
       {/* Reuse the application's navigation rather than the exported Stitch shell. */}
       <WorkbenchSidebar activeLabel="Runs" />
-      <section className={styles.workspace}>
+      <WorkbenchGridCanvas className={styles.workspace}>
         {/* Page identity and actions remain available above the execution history. */}
         <header className={styles.header}>
           <div>
@@ -276,6 +277,9 @@ export default function RunsWorkbench() {
             </p>
           </div>
           <div className={styles.actions}>
+            <Link href="/runs/preview">
+              Preview run detail
+            </Link>
             <button onClick={exportRuns} disabled={loading || filtered.length === 0}>
               <FiDownload aria-hidden="true" /> Export
             </button>
@@ -427,7 +431,7 @@ export default function RunsWorkbench() {
         <p role="status" className={styles.notice}>
           {notice}
         </p>
-      </section>
+      </WorkbenchGridCanvas>
     </main>
   );
 }
