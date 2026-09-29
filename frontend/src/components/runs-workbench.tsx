@@ -106,9 +106,9 @@ function RunRow({ run, onCopy }: { run: RunPresentation; onCopy: (id: string) =>
           {run.source.metrics.completion_token_result_count} output of{" "}
           {run.source.metrics.generation_result_count} saved generations
         </small>
-        <button disabled title="Run details will be available in a later update">
+        <Link href={`/runs/${encodeURIComponent(run.id)}`}>
           View run <FiArrowRight aria-hidden="true" />
-        </button>
+        </Link>
       </div>
       {/* Failure remains attached to its run, with the unexecuted count made explicit. */}
       {run.status === "failed" && (
@@ -277,9 +277,6 @@ export default function RunsWorkbench() {
             </p>
           </div>
           <div className={styles.actions}>
-            <Link href="/runs/preview">
-              Preview run detail
-            </Link>
             <button onClick={exportRuns} disabled={loading || filtered.length === 0}>
               <FiDownload aria-hidden="true" /> Export
             </button>

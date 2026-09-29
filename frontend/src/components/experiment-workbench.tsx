@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import {
   FiAlertCircle,
@@ -146,6 +147,9 @@ function ExperimentSectionHeading({
  * @returns A responsive index, retrieval, generation, evaluation, and dataset form.
  */
 export default function ExperimentWorkbench() {
+  // Navigate to the persisted run as soon as the launch request succeeds.
+  const router = useRouter();
+
   // Stores the validated backend-owned pipeline catalog.
   const [pipelineOptions, setPipelineOptions] = useState<PipelineOptions | null>(null);
 
@@ -176,7 +180,7 @@ export default function ExperimentWorkbench() {
   // Increments when the user asks to retry options and index inventory requests.
   const [loadAttempt, setLoadAttempt] = useState(0);
 
-  // Explains that benchmark submission remains deferred after inputs are complete.
+  // Shows validation or launch errors while the user remains on this page.
   const [benchmarkNotice, setBenchmarkNotice] = useState<string | null>(null);
 
   // Prevents duplicate benchmark submissions while FastAPI enqueues the run.
@@ -340,10 +344,8 @@ export default function ExperimentWorkbench() {
           },
         },
       });
-      setBenchmarkNotice(
-        `Benchmark ${benchmark.id.slice(0, 8)} was queued with ` +
-          `${benchmark.total_examples} questions.`,
-      );
+      // The run detail page polls progress and displays each question's result.
+      router.push(`/runs/${encodeURIComponent(benchmark.id)}`);
     } catch (error) {
       // Prefer the structured backend explanation for lineage or config failures.
       const apiMessage = isAxiosError(error)
@@ -453,7 +455,7 @@ export default function ExperimentWorkbench() {
             ))}
           </section>
 
-          {/* The notice prevents a configured-but-unimplemented launch from being silent. */}
+          {/* Keep launch and validation errors visible without leaving the form. */}
           {benchmarkNotice ? (
             <p
               className="border border-[var(--border-strong)] bg-white px-4 py-3 \

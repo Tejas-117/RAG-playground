@@ -31,6 +31,21 @@
 .preview svg { flex: none; margin-top: 1px; }
 .preview code { color: var(--charcoal); overflow-wrap: anywhere; }
 
+/* Run-level failures stay prominent without hiding the saved question results. */
+.runFailure {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--toast-error-text);
+  background: var(--toast-error-surface);
+  color: var(--toast-error-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.runFailure svg { flex: none; margin-top: 1px; }
+
 .header {
   padding: 20px 22px;
   border: 1px solid var(--border-strong);
@@ -75,6 +90,18 @@
 }
 
 .statusDot { width: 7px; height: 7px; background: var(--charcoal); border-radius: 50%; }
+.statusDot[data-active="true"] {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--charcoal);
+  background: transparent;
+  animation: run-detail-spin .8s linear infinite;
+}
+@keyframes run-detail-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .statusDot[data-active="true"] { animation: none; }
+}
 
 .identity {
   display: flex;
@@ -85,12 +112,12 @@
   color: var(--tone-black);
   font-size: 12px;
 }
+.elapsed { display: inline-flex; align-items: center; gap: 5px; font-weight: 650; }
 
 .identity code,
 .mono,
 .sectionMeta,
 .provenance,
-.configIds,
 .questionItemFoot,
 .footer {
   font-family: var(--font-geist-mono), monospace;
@@ -114,10 +141,11 @@
 .metricCard strong small { font-size: 13px; font-weight: 450; color: var(--tone-black); }
 .metricCard p { margin-top: auto; font-size: 11px; color: var(--tone-black); }
 .metricCard progress { width: 100%; height: 7px; accent-color: var(--charcoal); }
-.pairedMetrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
-.pairedMetrics div { display: flex; flex-direction: column; gap: 4px; }
+.pairedMetrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.pairedMetrics div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .pairedMetrics strong { font-size: 20px; font-weight: 630; }
 .pairedMetrics span { font-size: 11px; color: var(--tone-black); }
+.pairedMetrics small { font-size: 10px; color: var(--tone-black); }
 .metricCard .evaluationState { font-size: 18px; letter-spacing: 0; }
 
 /* The configuration strip reads in execution order and opens natively from its summary. */
@@ -154,12 +182,6 @@
 
 .configurationGrid b { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
 .configurationGrid span { font-size: 12px; color: var(--tone-black); overflow-wrap: anywhere; }
-.configIds {
-  padding: 9px 14px;
-  color: var(--tone-black);
-  font-size: 10px;
-  overflow-wrap: anywhere;
-}
 
 /* The selected question's dark left rule is the page's signature inspection marker. */
 .questionGrid { display: grid; gap: 14px; align-items: start; }

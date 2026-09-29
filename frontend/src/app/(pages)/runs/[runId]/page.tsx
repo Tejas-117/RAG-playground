@@ -1,6 +1,6 @@
 import RunDetailWorkbench from "@/components/run-detail-workbench";
 
-/** Render the sample inspection workspace for a requested run path. */
+/** Render API-backed inspection for the requested persisted benchmark run. */
 export default async function RunDetailPage({
   params,
 }: {

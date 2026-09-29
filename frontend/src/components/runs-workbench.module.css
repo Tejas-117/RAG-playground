@@ -69,7 +69,9 @@
 .row[data-failed="true"] progress::-webkit-progress-value { background: var(--toast-error-text); }
 .row[data-failed="true"] progress::-moz-progress-bar { background: var(--toast-error-text); }
 .metrics small { display: block; font-size: 10px; color: var(--muted-text); min-height: 15px; }
-.workspace .metrics button { border: 0; padding: 8px 0 0; background: transparent; }
+.workspace .metrics a { display: inline-flex; align-items: center; gap: 5px;
+  padding: 8px 0 0; }
+.workspace .metrics a:hover { text-decoration: underline; }
 .failure { grid-column: 1 / -1; display: flex; gap: 8px; font-size: 12px;
   color: var(--toast-error-text); border-top: 1px solid #ffdad6; padding-top: 14px; }
 .pagination { padding: 16px 24px; font-size: 12px; }
@@ -90,6 +92,6 @@
   .columns, .row { grid-template-columns: 1.05fr 1fr 1.25fr .8fr; gap: 24px; }
   .columns { display: grid; padding: 12px 24px; }
   .metrics { text-align: right; }
-  .metrics button { margin-left: auto; }
+  .metrics a { margin-left: auto; }
   .workspace { padding: 48px 32px; }
 }

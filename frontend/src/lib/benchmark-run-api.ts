@@ -3,7 +3,9 @@ import {
   type BenchmarkRunCreateRequest,
   type BenchmarkRunLaunch,
   parseBenchmarkRunLaunch,
+  parseBenchmarkRunDetail,
   parseBenchmarkRuns,
+  type BenchmarkRunDetail,
   type BenchmarkRunSummary,
 } from "@/validation/benchmark-runs";
 
@@ -11,6 +13,15 @@ import {
 export async function listBenchmarkRuns(signal?: AbortSignal): Promise<BenchmarkRunSummary[]> {
   const response = await apiClient.get<unknown>("/runs", { signal });
   return parseBenchmarkRuns(response.data);
+}
+
+/** Fetch one validated run with all saved example results; signal cancels stale requests. */
+export async function getBenchmarkRun(
+  runId: string,
+  signal?: AbortSignal,
+): Promise<BenchmarkRunDetail> {
+  const response = await apiClient.get<unknown>(`/runs/${encodeURIComponent(runId)}`, { signal });
+  return parseBenchmarkRunDetail(response.data);
 }
 
 /**

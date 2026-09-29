@@ -52,6 +52,84 @@ const benchmarkRunSummarySchema = benchmarkRunLaunchSchema.extend({
   }),
 });
 
+/** Persisted ranked evidence, with raw score semantics supplied by its retrieval result. */
+const retrievedChunkSchema = z.object({
+  rank: countSchema.positive(),
+  chunk_id: z.string().min(1),
+  raw_distance: z.number().finite(),
+  source_document_id: z.string().min(1),
+  original_filename: z.string().min(1),
+  ordinal: countSchema,
+  text: z.string(),
+  character_start_offset: countSchema.nullable(),
+  character_end_offset: countSchema.nullable(),
+  token_start_offset: countSchema.nullable(),
+  token_end_offset: countSchema.nullable(),
+  page_start: countSchema.positive().nullable(),
+  page_end: countSchema.positive().nullable(),
+  section_path: z.array(z.string()).nullable(),
+  source_metadata: z.record(z.string(), z.unknown()),
+});
+
+/** Full detail contract extends the compact run with ordered example outcomes. */
+const benchmarkRunDetailSchema = benchmarkRunSummarySchema.extend({
+  examples: z.array(z.object({
+    id: z.string().min(1),
+    example_id: z.string().min(1),
+    ordinal: countSchema,
+    question: z.string().min(1),
+    reference_answer: z.string().nullable(),
+    status: z.enum(["pending", "running", "completed", "failed"]),
+    current_stage: z.enum(["retrieval", "generation"]).nullable(),
+    started_at: timestampSchema.nullable(),
+    completed_at: timestampSchema.nullable(),
+    duration_ms: countSchema.nullable(),
+    retrieval: z.object({
+      status: z.enum(["pending", "running", "completed", "failed"]),
+      result_id: z.string().nullable(),
+      requested_top_k: countSchema.positive(),
+      returned_count: countSchema.nullable(),
+      distance_metric: z.enum(["cosine", "dot_product", "euclidean"]),
+      duration_ms: countSchema.nullable(),
+      chunks: z.array(retrievedChunkSchema),
+    }).nullable(),
+    generation: z.object({
+      status: z.enum(["pending", "running", "completed", "failed"]),
+      result_id: z.string().nullable(),
+      retrieval_result_id: z.string().nullable(),
+      provider: z.string().min(1),
+      model: z.string().min(1),
+      provider_model: z.string().nullable(),
+      answer: z.string().nullable(),
+      finish_reason: z.string().nullable(),
+      prompt_template_version: z.string().nullable(),
+      provider_policy_version: z.string().nullable(),
+      prompt_tokens: countSchema.nullable(),
+      completion_tokens: countSchema.nullable(),
+      total_tokens: countSchema.nullable(),
+      provider_called: z.boolean().nullable(),
+      context_chunks: z.array(z.object({
+        ordinal: countSchema.positive(),
+        retrieval_rank: countSchema.positive(),
+        chunk_id: z.string().min(1),
+      })),
+      duration_ms: countSchema.nullable(),
+    }).nullable(),
+    error: benchmarkRunSummarySchema.shape.error,
+  })),
+});
+
+/** Validated full run including its question-level evidence and answers. */
+export type BenchmarkRunDetail = z.infer<typeof benchmarkRunDetailSchema>;
+
+/** Validate an unknown GET /runs/{id} body before rendering it. */
+export function parseBenchmarkRunDetail(value: unknown): BenchmarkRunDetail {
+  const result = benchmarkRunDetailSchema.safeParse(value);
+  // Malformed results must not be mistaken for incomplete execution.
+  if (!result.success) throw new Error("The backend returned invalid run details.");
+  return result.data;
+}
+
 /** Validated summary used by history, filters, and export. */
 export type BenchmarkRunSummary = z.infer<typeof benchmarkRunSummarySchema>;
 
