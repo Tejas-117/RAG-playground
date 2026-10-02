@@ -245,9 +245,20 @@
 .distanceNote { margin-bottom: 14px; color: var(--tone-black); font-size: 11px; line-height: 1.55; }
 .chunkList { display: flex; flex-direction: column; gap: 9px; }
 .chunk { padding: 12px; background: var(--panel-surface); }
+.chunk[data-relevant-match="true"] {
+  background: var(--toast-success-surface);
+  box-shadow: inset 4px 0 0 var(--toast-success-text);
+}
 .chunkHead { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; font-size: 11px; }
 .rank { padding: 4px 6px; background: var(--charcoal); color: white; font-size: 10px; }
 .contextBadge { padding: 4px 6px; background: var(--white); font-size: 10px; font-weight: 650; }
+.relevantBadge {
+  padding: 4px 6px;
+  background: var(--toast-success-text);
+  color: var(--white);
+  font-size: 10px;
+  font-weight: 650;
+}
 .chunkSource { display: flex; align-items: center; gap: 5px; margin: 12px 0 8px;
   color: var(--tone-black); font-size: 11px; flex-wrap: wrap; }
 .chunkSource svg { flex: none; }

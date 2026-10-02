@@ -72,8 +72,14 @@ export function useRunDetail(runId: string) {
         setRun(snapshot);
         setError("");
 
-        // Terminal snapshots need no further requests until the user retries.
-        if (snapshot.status === "pending" || snapshot.status === "running") {
+        // Continue while benchmark execution or its latest independent evaluation is active.
+        const evaluationActive = snapshot.latest_evaluation?.status === "pending"
+          || snapshot.latest_evaluation?.status === "running";
+        if (
+          snapshot.status === "pending"
+          || snapshot.status === "running"
+          || evaluationActive
+        ) {
           timer = setTimeout(refresh, ACTIVE_REFRESH_MS);
         }
       } catch (cause) {

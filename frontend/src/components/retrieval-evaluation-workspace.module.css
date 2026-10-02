@@ -1,0 +1,559 @@
+/* Evaluation reads as a durable audit ledger inside the existing monochrome workbench. */
+.workspace {
+  margin-bottom: 14px;
+  border: 1px solid var(--border-strong);
+  background: var(--white);
+}
+
+.workspace button,
+.questionPanel button {
+  cursor: pointer;
+}
+
+.workspace button:focus-visible,
+.questionPanel button:focus-visible,
+.evaluationForm input:focus-visible {
+  outline: 2px solid var(--charcoal);
+  outline-offset: 3px;
+}
+
+.eyebrow {
+  display: block;
+  color: var(--tone-black);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+.workspaceHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.workspaceHead h2 {
+  margin-top: 5px;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -.03em;
+}
+
+.workspaceHead p {
+  max-width: 620px;
+  margin-top: 6px;
+  color: var(--tone-black);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.evaluateButton,
+.formActions button,
+.loadError button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--white);
+  color: var(--charcoal);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.evaluateButton:hover:not(:disabled),
+.formActions button:hover:not(:disabled),
+.loadError button:hover {
+  background: var(--panel-surface);
+}
+
+.evaluateButton:disabled,
+.formActions button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.evaluationForm {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--page-surface);
+}
+
+.evaluationForm legend {
+  margin-bottom: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.metricChoices {
+  display: grid;
+  gap: 8px;
+}
+
+.metricChoices label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  background: var(--white);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.metricChoices input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--charcoal);
+}
+
+.formActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.formActions .primaryAction {
+  border-color: var(--charcoal);
+  background: var(--charcoal);
+  color: var(--white);
+}
+
+.formActions .primaryAction:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.formError {
+  margin-top: 9px;
+  color: var(--toast-error-text);
+  font-size: 11px;
+}
+
+.loadError,
+.emptyState,
+.activeMessage,
+.attemptFailure,
+.coverage,
+.detailLoading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.loadError {
+  margin: 16px 20px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--toast-error-border);
+  background: var(--toast-error-surface);
+  color: var(--toast-error-text);
+  font-size: 12px;
+}
+
+.loadError button {
+  min-height: 30px;
+  margin-left: auto;
+  padding: 5px 9px;
+}
+
+.emptyState {
+  min-height: 150px;
+  justify-content: center;
+  padding: 30px;
+  color: var(--tone-black);
+  font-size: 12px;
+}
+
+.emptyState strong {
+  display: block;
+  color: var(--charcoal);
+  font-size: 14px;
+}
+
+.emptyState p {
+  margin-top: 4px;
+}
+
+.attemptGrid {
+  display: grid;
+  min-height: 250px;
+}
+
+.attemptList {
+  max-height: 420px;
+  overflow: auto;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--page-surface);
+}
+
+.attemptButton {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  gap: 5px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  border-left: 4px solid transparent;
+  background: transparent;
+  color: var(--charcoal);
+  text-align: left;
+}
+
+.attemptButton:hover {
+  background: var(--white);
+}
+
+.attemptButton[aria-current="true"] {
+  border-left-color: var(--charcoal);
+  background: var(--white);
+}
+
+.attemptNumber {
+  color: var(--tone-black);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.attemptButton > strong {
+  font-size: 12px;
+}
+
+.attemptButton small {
+  color: var(--tone-black);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.attemptStatus,
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.attemptStatus {
+  margin-top: 4px;
+}
+
+.attemptButton[data-status="failed"] .attemptStatus,
+.statusBadge[data-status="failed"] {
+  color: var(--toast-error-text);
+}
+
+.attemptDetail {
+  min-width: 0;
+  padding: 20px;
+}
+
+.attemptDetailHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.attemptDetailHead h3 {
+  margin-top: 5px;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.attemptDetailHead code {
+  display: block;
+  margin-top: 5px;
+  color: var(--tone-black);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.statusBadge {
+  padding: 5px 7px;
+  background: var(--panel-surface);
+  white-space: nowrap;
+}
+
+.aggregateGrid,
+.questionScores {
+  display: grid;
+  gap: 1px;
+  margin-top: 20px;
+  background: var(--border-soft);
+}
+
+.aggregateGrid > div,
+.questionScores > div {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 15px;
+  background: var(--page-surface);
+}
+
+.aggregateGrid span,
+.questionScores span {
+  color: var(--tone-black);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.aggregateGrid strong,
+.questionScores strong {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 23px;
+  font-weight: 650;
+}
+
+.coverage,
+.activeMessage,
+.attemptFailure {
+  margin-top: 16px;
+  padding: 11px 12px;
+  background: var(--panel-surface);
+  font-size: 12px;
+}
+
+.attemptFailure {
+  border: 1px solid var(--toast-error-border);
+  background: var(--toast-error-surface);
+  color: var(--toast-error-text);
+}
+
+.detailLoading {
+  justify-content: center;
+  min-height: 220px;
+  color: var(--tone-black);
+  font-size: 12px;
+}
+
+.summaryHeading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.summaryState {
+  font-size: 18px;
+  letter-spacing: 0;
+}
+
+.summaryState[data-status="failed"] {
+  color: var(--toast-error-text);
+}
+
+.summaryScores {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.summaryScores span {
+  display: flex;
+  flex-direction: column;
+  min-width: 62px;
+  gap: 2px;
+  padding: 6px 7px;
+  background: var(--panel-surface);
+}
+
+.summaryScores b {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 12px;
+}
+
+.summaryScores small {
+  color: var(--tone-black);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.spinner {
+  flex: none;
+  animation: evaluation-spin .8s linear infinite;
+}
+
+/* The rank tape connects metric values to the exact saved chunk positions that produced them. */
+.questionPanel {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--border-soft);
+  background: var(--white);
+}
+
+.questionPanelHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -16px -16px 16px;
+  padding: 12px 16px;
+  background: var(--panel-surface);
+}
+
+.questionPanelHead h2 {
+  margin-top: 3px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.questionMessage {
+  padding: 20px 14px;
+  background: var(--page-surface);
+  color: var(--tone-black);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.expectedDocuments {
+  margin-top: 16px;
+}
+
+.expectedDocuments > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.expectedDocuments > div span {
+  max-width: 100%;
+  padding: 5px 7px;
+  border: 1px solid var(--border-subtle);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.rankTape {
+  margin-top: 16px;
+  border-top: 1px solid var(--border-soft);
+  list-style: none;
+}
+
+.rankTape li {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 9px 4px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.rankTape li > span {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rankTape li > div {
+  min-width: 0;
+}
+
+.rankTape strong,
+.rankTape code {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.rankTape strong {
+  font-size: 11px;
+}
+
+.rankTape code {
+  margin-top: 3px;
+  color: var(--tone-black);
+  font-size: 9px;
+}
+
+.rankTape b,
+.rankTape small {
+  padding: 4px 6px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.rankTape b {
+  background: var(--charcoal);
+  color: var(--white);
+  text-transform: uppercase;
+}
+
+.rankTape small {
+  color: var(--tone-black);
+}
+
+.rankTape li[data-matched="true"] {
+  background: var(--toast-success-surface);
+  box-shadow: inset 4px 0 0 var(--toast-success-text);
+}
+
+@keyframes evaluation-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (min-width: 640px) {
+  .metricChoices,
+  .aggregateGrid,
+  .questionScores {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 900px) {
+  .attemptGrid {
+    grid-template-columns: minmax(220px, .75fr) minmax(0, 2fr);
+  }
+
+  .attemptList {
+    border-right: 1px solid var(--border-soft);
+    border-bottom: 0;
+  }
+}
+
+@media (max-width: 639px) {
+  .workspaceHead {
+    flex-direction: column;
+  }
+
+  .evaluateButton {
+    width: 100%;
+  }
+
+  .rankTape li {
+    grid-template-columns: 28px minmax(0, 1fr);
+  }
+
+  .rankTape li > :last-child {
+    grid-column: 2;
+    width: fit-content;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}

@@ -60,9 +60,6 @@ function RunRow({ run, onCopy }: { run: RunPresentation; onCopy: (id: string) =>
         <p>
           Top K: {run.topK} · Temp: {run.temperature} · Chunk: {run.chunkSize}
         </p>
-        <p>
-          Evaluation: Not evaluated
-        </p>
       </div>
       {/* Progress counts completed questions, never an invented time estimate. */}
       <div>
@@ -101,11 +98,6 @@ function RunRow({ run, onCopy }: { run: RunPresentation; onCopy: (id: string) =>
         <p>
           Tokens: {tokens(run.inputTokens)} in / {tokens(run.outputTokens)} out
         </p>
-        <small>
-          Usage reported: {run.source.metrics.prompt_token_result_count} input /{" "}
-          {run.source.metrics.completion_token_result_count} output of{" "}
-          {run.source.metrics.generation_result_count} saved generations
-        </small>
         <Link href={`/runs/${encodeURIComponent(run.id)}`}>
           View run <FiArrowRight aria-hidden="true" />
         </Link>

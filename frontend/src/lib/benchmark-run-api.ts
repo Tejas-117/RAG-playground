@@ -5,8 +5,13 @@ import {
   parseBenchmarkRunLaunch,
   parseBenchmarkRunDetail,
   parseBenchmarkRuns,
+  parseRetrievalEvaluationDetail,
+  parseRetrievalEvaluations,
   type BenchmarkRunDetail,
   type BenchmarkRunSummary,
+  type RetrievalEvaluationDetail,
+  type RetrievalEvaluationSummary,
+  type RetrievalMetric,
 } from "@/validation/benchmark-runs";
 
 /** Fetch validated history; optional signal cancels the request on hide or unmount. */
@@ -37,4 +42,66 @@ export async function createBenchmarkRun(
 ): Promise<BenchmarkRunLaunch> {
   const response = await apiClient.post<unknown>("/runs", payload, { signal });
   return parseBenchmarkRunLaunch(response.data);
+}
+
+/**
+ * List durable retrieval evaluation attempts for one benchmark.
+ *
+ * @param runId - Stable completed or active benchmark identifier.
+ * @param signal - Optional request cancellation signal.
+ * @returns Validated evaluation summaries ordered newest first.
+ */
+export async function listRetrievalEvaluations(
+  runId: string,
+  signal?: AbortSignal,
+): Promise<RetrievalEvaluationSummary[]> {
+  const encodedRunId = encodeURIComponent(runId);
+  const response = await apiClient.get<unknown>(`/runs/${encodedRunId}/evaluations`, {
+    signal,
+  });
+  return parseRetrievalEvaluations(response.data);
+}
+
+/**
+ * Read one retrieval evaluation with its saved question-level evidence.
+ *
+ * @param runId - Stable parent benchmark identifier.
+ * @param evaluationId - Stable evaluation attempt identifier.
+ * @param signal - Optional request cancellation signal.
+ * @returns The validated evaluation detail.
+ */
+export async function getRetrievalEvaluation(
+  runId: string,
+  evaluationId: string,
+  signal?: AbortSignal,
+): Promise<RetrievalEvaluationDetail> {
+  const encodedRunId = encodeURIComponent(runId);
+  const encodedEvaluationId = encodeURIComponent(evaluationId);
+  const response = await apiClient.get<unknown>(
+    `/runs/${encodedRunId}/evaluations/${encodedEvaluationId}`,
+    { signal },
+  );
+  return parseRetrievalEvaluationDetail(response.data);
+}
+
+/**
+ * Queue independent scoring of a completed benchmark's saved retrieval results.
+ *
+ * @param runId - Stable completed benchmark identifier.
+ * @param metrics - Retrieval metrics selected for the new attempt.
+ * @param signal - Optional request cancellation signal.
+ * @returns The validated pending evaluation attempt.
+ */
+export async function createRetrievalEvaluation(
+  runId: string,
+  metrics: RetrievalMetric[],
+  signal?: AbortSignal,
+): Promise<RetrievalEvaluationDetail> {
+  const encodedRunId = encodeURIComponent(runId);
+  const response = await apiClient.post<unknown>(
+    `/runs/${encodedRunId}/evaluations`,
+    { retrieval_metrics: metrics },
+    { signal },
+  );
+  return parseRetrievalEvaluationDetail(response.data);
 }

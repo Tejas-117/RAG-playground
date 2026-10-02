@@ -7,6 +7,68 @@ const countSchema = z.number().int().nonnegative();
 /** Validate timestamps before they are used for date filters and elapsed time. */
 const timestampSchema = z.string().datetime({ offset: true });
 
+/** Retrieval metrics currently calculated by the deterministic backend evaluator. */
+export const retrievalMetricSchema = z.enum([
+  "hit_rate_at_k",
+  "recall_at_k",
+  "mrr",
+]);
+
+/** Lifecycle states shared by benchmarks and their independent evaluation attempts. */
+const lifecycleStatusSchema = z.enum(["pending", "running", "completed", "failed"]);
+
+/** Runtime contract for one retrieval evaluation configuration snapshot. */
+const retrievalEvaluationConfigurationSchema = z.object({
+  retrieval_metrics: z.array(retrievalMetricSchema),
+  answer_metrics: z.array(z.string().min(1)),
+});
+
+/** Scores stay within the normalized zero-to-one range or remain unavailable. */
+const evaluationScoreSchema = z.number().min(0).max(1).nullable();
+
+/** Selected metrics form a partial record because each attempt can choose a subset. */
+const evaluationAggregatesSchema = z.partialRecord(
+  retrievalMetricSchema,
+  evaluationScoreSchema,
+);
+
+/** Runtime contract for a durable evaluation attempt without question-level evidence. */
+export const retrievalEvaluationSummarySchema = z.object({
+  id: z.string().min(1),
+  benchmark_run_id: z.string().min(1),
+  status: lifecycleStatusSchema,
+  configuration: retrievalEvaluationConfigurationSchema,
+  aggregates: evaluationAggregatesSchema,
+  eligible_count: countSchema.nullable(),
+  total_count: countSchema.nullable(),
+  error: z.object({
+    code: z.string().min(1),
+    message: z.string().min(1),
+  }).nullable(),
+  created_at: timestampSchema,
+  started_at: timestampSchema.nullable(),
+  completed_at: timestampSchema.nullable(),
+});
+
+/** Runtime contract for one question's scores and document-ranking evidence. */
+const retrievalEvaluationQuestionSchema = z.object({
+  example_id: z.string().min(1),
+  ordinal: countSchema,
+  skip_reason: z.literal("no_resolved_document_labels").nullable(),
+  scores: z.partialRecord(
+    retrievalMetricSchema,
+    z.number().min(0).max(1),
+  ).nullable(),
+  matching_ranks: z.array(z.number().int().positive()),
+  relevant_document_ids: z.array(z.string().min(1)),
+  ranked_document_ids: z.array(z.string().min(1)),
+});
+
+/** Runtime contract for one attempt including its ordered per-question evidence. */
+export const retrievalEvaluationDetailSchema = retrievalEvaluationSummarySchema.extend({
+  questions: z.array(retrievalEvaluationQuestionSchema),
+});
+
 /** Runtime contract for the persisted benchmark returned immediately after launch. */
 const benchmarkRunLaunchSchema = z.object({
   id: z.string().min(1),
@@ -16,7 +78,7 @@ const benchmarkRunLaunchSchema = z.object({
   dataset_name: z.string().min(1),
   corpus_id: z.string().min(1),
   vector_index_id: z.string().min(1),
-  status: z.enum(["pending", "running", "completed", "failed"]),
+  status: lifecycleStatusSchema,
   total_examples: z.number().int().positive(),
   completed_examples: z.number().int().nonnegative(),
   created_at: z.string().min(1),
@@ -50,6 +112,7 @@ const benchmarkRunSummarySchema = benchmarkRunLaunchSchema.extend({
     prompt_token_result_count: countSchema,
     completion_token_result_count: countSchema,
   }),
+  latest_evaluation: retrievalEvaluationSummarySchema.nullable(),
 });
 
 /** Persisted ranked evidence, with raw score semantics supplied by its retrieval result. */
@@ -133,11 +196,54 @@ export function parseBenchmarkRunDetail(value: unknown): BenchmarkRunDetail {
 /** Validated summary used by history, filters, and export. */
 export type BenchmarkRunSummary = z.infer<typeof benchmarkRunSummarySchema>;
 
+/** Validated compact evaluation attempt used by history and run summaries. */
+export type RetrievalEvaluationSummary = z.infer<typeof retrievalEvaluationSummarySchema>;
+
+/** Validated evaluation attempt containing ordered question-level evidence. */
+export type RetrievalEvaluationDetail = z.infer<typeof retrievalEvaluationDetailSchema>;
+
+/** Stable metric identifiers accepted by the retrieval evaluation endpoint. */
+export type RetrievalMetric = z.infer<typeof retrievalMetricSchema>;
+
 /** Validate an unknown GET /runs body; returns summaries or throws a safe error. */
 export function parseBenchmarkRuns(value: unknown): BenchmarkRunSummary[] {
   const result = z.array(benchmarkRunSummarySchema).safeParse(value);
   // Reject the entire snapshot instead of displaying partially validated history.
   if (!result.success) throw new Error("The backend returned invalid run history.");
+  return result.data;
+}
+
+/**
+ * Validate evaluation history returned by the backend.
+ *
+ * @param value - Untrusted response body from the evaluation history endpoint.
+ * @returns Evaluation attempts ordered as supplied by the backend.
+ */
+export function parseRetrievalEvaluations(value: unknown): RetrievalEvaluationSummary[] {
+  const result = z.array(retrievalEvaluationSummarySchema).safeParse(value);
+
+  // Reject an incomplete history snapshot rather than mixing valid and invalid attempts.
+  if (!result.success) {
+    throw new Error("The backend returned invalid evaluation history.");
+  }
+
+  return result.data;
+}
+
+/**
+ * Validate one evaluation attempt and its question-level evidence.
+ *
+ * @param value - Untrusted response body from an evaluation detail or create request.
+ * @returns The validated durable evaluation attempt.
+ */
+export function parseRetrievalEvaluationDetail(value: unknown): RetrievalEvaluationDetail {
+  const result = retrievalEvaluationDetailSchema.safeParse(value);
+
+  // Malformed evidence must never be presented as a valid score explanation.
+  if (!result.success) {
+    throw new Error("The backend returned invalid evaluation details.");
+  }
+
   return result.data;
 }
 

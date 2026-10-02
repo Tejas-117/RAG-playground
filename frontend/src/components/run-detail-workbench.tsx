@@ -14,13 +14,21 @@ import {
 } from "react-icons/fi";
 import WorkbenchSidebar from "@/components/workbench-sidebar";
 import WorkbenchGridCanvas from "@/components/workbench-grid-canvas";
+import {
+  EvaluationSummaryCard,
+  QuestionEvaluationPanel,
+  RetrievalEvaluationWorkspace,
+} from "@/components/retrieval-evaluation-workspace";
 import { useRunDetail } from "@/lib/use-run-detail";
+import { useRetrievalEvaluations } from "@/lib/use-retrieval-evaluations";
 import type { BenchmarkRunDetail } from "@/validation/benchmark-runs";
+import type { RetrievalEvaluationDetail } from "@/validation/benchmark-runs";
 import styles from "./run-detail-workbench.module.css";
 
 type RunQuestion = BenchmarkRunDetail["examples"][number];
 type RunChunk = NonNullable<RunQuestion["retrieval"]>["chunks"][number];
 type QuestionFilter = "all" | RunQuestion["status"];
+type EvaluationQuestion = RetrievalEvaluationDetail["questions"][number];
 
 /** Format a recorded millisecond duration for a compact data label. */
 function formatDuration(value: number | null): string {
@@ -53,13 +61,15 @@ function EvidenceChunk({
   chunk,
   metric,
   contextOrder,
+  isRelevantMatch,
 }: {
   chunk: RunChunk;
   metric: string;
   contextOrder: number | null;
+  isRelevantMatch: boolean;
 }) {
   return (
-    <article className={styles.chunk}>
+    <article className={styles.chunk} data-relevant-match={isRelevantMatch}>
       {/* Rank, distance, and prompt inclusion are separate pieces of evidence. */}
       <div className={styles.chunkHead}>
         <strong className={styles.rank}>
@@ -71,6 +81,11 @@ function EvidenceChunk({
         {contextOrder !== null && (
           <span className={styles.contextBadge}>
             Included in prompt · context {contextOrder}
+          </span>
+        )}
+        {isRelevantMatch && (
+          <span className={styles.relevantBadge}>
+            Relevant label match
           </span>
         )}
       </div>
@@ -113,9 +128,13 @@ function EvidenceChunk({
 function QuestionInspector({
   question,
   topK,
+  evaluation,
+  evaluationQuestion,
 }: {
   question: RunQuestion;
   topK: number;
+  evaluation: RetrievalEvaluationDetail | null;
+  evaluationQuestion: EvaluationQuestion | null;
 }) {
   // A generation can be missing while retrieval has already been saved.
   const retrieval = question.retrieval;
@@ -186,6 +205,14 @@ function QuestionInspector({
         )}
       </section>
 
+      {/* Evaluation connects selected metrics to labels and preserved chunk ranks. */}
+      <QuestionEvaluationPanel
+        chunks={retrieval?.chunks ?? []}
+        evaluation={evaluation}
+        outcome={evaluationQuestion}
+        topK={topK}
+      />
+
       {/* Ranked evidence can exist even when generation has not completed. */}
       <section className={styles.panel} aria-labelledby="retrieval-heading">
         <div className={styles.panelHead}>
@@ -211,6 +238,7 @@ function QuestionInspector({
                 contextOrder={generation?.context_chunks.find((item) =>
                   item.chunk_id === chunk.chunk_id && item.retrieval_rank === chunk.rank
                 )?.ordinal ?? null}
+                isRelevantMatch={evaluationQuestion?.matching_ranks.includes(chunk.rank) ?? false}
               />
             ))}
           </div>
@@ -230,6 +258,18 @@ function QuestionInspector({
 export default function RunDetailWorkbench({ requestedRunId }: { requestedRunId: string }) {
   // The detail hook owns request cancellation, polling, and retry.
   const { run, corpusName, loading, error, retry } = useRunDetail(requestedRunId);
+
+  // The latest marker restarts history loading when automatic scoring changes lifecycle state.
+  const latestEvaluationMarker = run?.latest_evaluation
+    ? `${run.latest_evaluation.id}:${run.latest_evaluation.status}`
+    : "";
+
+  // Evaluation history and selected evidence remain independent from benchmark polling.
+  const evaluationState = useRetrievalEvaluations(
+    requestedRunId,
+    run !== null,
+    latestEvaluationMarker,
+  );
 
   // Search narrows the question navigator without a network request.
   const [search, setSearch] = useState("");
@@ -261,6 +301,13 @@ export default function RunDetailWorkbench({ requestedRunId }: { requestedRunId:
   // A missing selection falls back to the first saved example on every fresh run.
   const selected = run?.examples.find((question) => question.id === selectedId)
     ?? run?.examples[0];
+
+  // Match evaluation evidence by immutable dataset example ID, not display position.
+  const selectedEvaluationQuestion = selected
+    ? evaluationState.detail?.questions.find(
+      (question) => question.example_id === selected.example_id,
+    ) ?? null
+    : null;
 
   // Apply both local controls while preserving the dataset's original question order.
   const visibleQuestions = (run?.examples ?? []).filter((question) => (
@@ -390,11 +437,11 @@ export default function RunDetailWorkbench({ requestedRunId }: { requestedRunId:
               {" "}{run.metrics.completion_token_result_count} output of
               {" "}{run.metrics.generation_result_count} generations</p>
           </article>
-          <article className={styles.metricCard}>
-            <span className={styles.eyebrow}>Evaluation status</span>
-            <strong className={styles.evaluationState}>Not evaluated</strong>
-            <p>Execution status does not measure answer quality.</p>
-          </article>
+          <EvaluationSummaryCard
+            className={styles.metricCard}
+            evaluation={evaluationState.attempts[0] ?? run.latest_evaluation}
+            topK={run.configuration.retrieval.top_k}
+          />
         </section>
 
         {/* An expandable snapshot follows the pipeline's real stage order. */}
@@ -423,10 +470,17 @@ export default function RunDetailWorkbench({ requestedRunId }: { requestedRunId:
               <span>{[
                 ...run.configuration.evaluation.retrieval_metrics,
                 ...run.configuration.evaluation.answer_metrics,
-              ].join(", ") || "None configured"}</span>
-              <span>Configured; not evaluated</span></div>
+              ].join(", ") || "None configured"}</span></div>
           </div>
         </details>
+
+        {/* The evaluation ledger keeps repeatable scoring separate from run execution. */}
+        <RetrievalEvaluationWorkspace
+          runStatus={run.status}
+          savedMetrics={run.configuration.evaluation.retrieval_metrics}
+          state={evaluationState}
+          topK={run.configuration.retrieval.top_k}
+        />
 
         {/* The question rail is the page's primary interaction and mirrors the Stitch layout. */}
         <div className={styles.questionGrid}>
@@ -495,7 +549,12 @@ export default function RunDetailWorkbench({ requestedRunId }: { requestedRunId:
             </div>
           </section>
           {selected && (
-            <QuestionInspector question={selected} topK={run.configuration.retrieval.top_k} />
+            <QuestionInspector
+              evaluation={evaluationState.detail}
+              evaluationQuestion={selectedEvaluationQuestion}
+              question={selected}
+              topK={run.configuration.retrieval.top_k}
+            />
           )}
         </div>
         <p className={styles.srNotice} role="status">
@@ -503,7 +562,7 @@ export default function RunDetailWorkbench({ requestedRunId }: { requestedRunId:
         </p>
         <footer className={styles.footer}>
           <FiClock aria-hidden="true" />
-          Results are saved execution snapshots; evaluation scores are not available yet.
+          Execution and evaluation results are saved as independent snapshots.
         </footer>
           </>
         )}
