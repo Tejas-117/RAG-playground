@@ -9,6 +9,7 @@ from backend.db.repositories.retrieval_evaluations import (
     fail_evaluation,
 )
 from backend.db.repositories.work_queue import claim_next_pending_work_item
+from backend.evaluation.answer import AnswerJudge, GroqAnswerJudge
 from backend.pipeline.benchmark_execution import (
     BenchmarkExecutor,
     get_benchmark_executor,
@@ -24,7 +25,7 @@ from backend.pipeline.query_execution import QueryExecutionError
 logger = logging.getLogger(__name__)
 
 # A short idle delay keeps local UI latency low without continuously polling SQLite.
-RUN_QUEUE_POLL_INTERVAL_SECONDS = 2
+RUN_QUEUE_POLL_INTERVAL_SECONDS = 4
 
 
 class PipelineRunWorker:
@@ -38,18 +39,21 @@ class PipelineRunWorker:
         benchmark_executor_factory: Callable[[], BenchmarkExecutor] = (
             get_benchmark_executor
         ),
+        answer_judge_factory: Callable[[], AnswerJudge] = GroqAnswerJudge,
     ) -> None:
         """Configure the stateless executor factory used for each claimed run.
 
         Args:
             prepared_index_executor_factory: Callable returning a preparation executor.
             benchmark_executor_factory: Callable returning a dataset benchmark executor.
+            answer_judge_factory: Callable returning an answer-evaluation judge.
 
         Returns:
             None. Queue and run state remain in SQLite.
         """
         self._prepared_index_executor_factory = prepared_index_executor_factory
         self._benchmark_executor_factory = benchmark_executor_factory
+        self._answer_judge_factory = answer_judge_factory
 
     async def run_forever(self) -> None:
         """Poll the persisted queue until the application cancels the worker.
@@ -88,8 +92,12 @@ class PipelineRunWorker:
                     executor = self._benchmark_executor_factory()
 
                 else:
-                    # Saved scoring uses no provider or vector-store adapters.
-                    await asyncio.to_thread(execute_evaluation, work_id)
+                    # Evaluation reads saved outputs and injects its separate judge adapter.
+                    await asyncio.to_thread(
+                        execute_evaluation,
+                        work_id,
+                        self._answer_judge_factory(),
+                    )
                     continue
 
                 # Parsing, provider HTTP, Chroma, and persistence are synchronous.

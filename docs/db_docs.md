@@ -293,6 +293,48 @@ Query-time artifacts use `benchmark_retrieval_result`,
 `benchmark_generation_context_chunk`. They retain raw distances, source chunks,
 provider provenance, and exact prompt-context links under each child execution.
 
+## Evaluation attempt tables
+
+Evaluation is a separate durable job over immutable benchmark output. Completing
+a benchmark queues an attempt when at least one retrieval or answer metric was
+selected. `POST /runs/{run_id}/evaluations` can queue another attempt without
+rerunning retrieval or generation.
+
+### `retrieval_evaluation`
+
+The historical table name is retained for API and local database continuity,
+although each attempt can now contain retrieval metrics, answer metrics, or both.
+
+| Field | Description |
+| --- | --- |
+| `id` | Stable evaluation-attempt identifier. |
+| `benchmark_run_id` | Completed benchmark whose saved outputs are scored. |
+| `status` | Independent lifecycle: `pending`, `running`, `completed`, or `failed`. |
+| `config_json` | Immutable metric selections plus fixed evaluator provider, model, prompt version, rubric version, and request policy. |
+| `aggregate_json` | Flat metric-to-score object. Each value is the macro average of successfully scored eligible questions. |
+| `coverage_json` | Per-metric total, eligible, scored, skipped, and error counts. |
+| `has_errors` | Whether some question-level judge requests failed while other scores were retained. |
+| `eligible_count` | Compatibility coverage count; detailed metric-specific eligibility lives in `coverage_json`. |
+| `total_count` | Total benchmark questions considered by the attempt. |
+| `error_code` / `error_message` | Safe structured terminal attempt failure. |
+| `created_at`, `started_at`, `completed_at` | Independent evaluation lifecycle timestamps. |
+
+Answer metrics use the fixed Groq `openai/gpt-oss-20b` evaluator with temperature
+zero, low reasoning effort, strict JSON Schema output, and no automatic paid-call
+retry. The server reads `GROQ_API_KEY` only when an attempt selects answer metrics.
+The versioned rubric returns an integer from zero through four, stored alongside
+its normalized zero-to-one score and short rationale. Groundedness also retains
+one-based ranks into the exact generation context.
+
+### `retrieval_evaluation_question`
+
+Stores one auditable result per dataset example and attempt. `result_json`
+contains selected retrieval scores and rank evidence, selected answer scores,
+rationales, groundedness evidence ranks, metric skip reasons, structured judge
+errors, request duration, token usage, provider request ID, and reported model.
+Rows are committed independently so successful question results survive a later
+provider or process failure.
+
 ## `prepared_index`
 
 Represents one user-facing named request to prepare an immutable corpus through

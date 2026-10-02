@@ -237,16 +237,20 @@ class BenchmarkRunMetricsResponse(BaseModel):
 
 
 class EvaluationRequest(BaseModel):
-    """Select retrieval metrics, or use the run snapshot when omitted.
+    """Select metric categories, or use each run snapshot category when omitted.
 
     Attributes:
         retrieval_metrics: Optional metric override for the new scoring attempt.
+        answer_metrics: Optional answer metric override for the new scoring attempt.
     """
 
     model_config = ConfigDict(extra="forbid")
     retrieval_metrics: list[Literal["hit_rate_at_k", "recall_at_k", "mrr"]] | None = (
         None
     )
+    answer_metrics: (
+        list[Literal["groundedness", "answer_relevance", "answer_correctness"]] | None
+    ) = None
 
 
 class EvaluationSummaryResponse(BaseModel):
@@ -254,11 +258,13 @@ class EvaluationSummaryResponse(BaseModel):
 
     Attributes:
         id: Stable evaluation-attempt identifier.
-        benchmark_run_id: Completed benchmark whose saved retrieval is scored.
+        benchmark_run_id: Completed benchmark whose saved outputs are scored.
         status: Independent lifecycle state of this evaluation attempt.
-        configuration: Saved retrieval and answer metric selections.
-        aggregates: Selected retrieval metric averages across eligible questions.
-        eligible_count: Questions with at least one resolved document label.
+        configuration: Saved metric selections and evaluator provenance.
+        aggregates: Selected metric averages across successfully scored questions.
+        coverage: Per-metric eligible, scored, skipped, and error counts.
+        has_errors: Whether some question-level work failed while scores were retained.
+        eligible_count: Compatibility count; detailed eligibility is in coverage.
         total_count: Total benchmark questions considered by the attempt.
         error: Safe structured terminal error when evaluation fails.
         created_at: Timestamp at which the attempt was queued.
@@ -269,8 +275,10 @@ class EvaluationSummaryResponse(BaseModel):
     id: str
     benchmark_run_id: str
     status: RunStatus
-    configuration: dict[str, list[str]]
+    configuration: dict[str, object]
     aggregates: dict[str, float | None]
+    coverage: dict[str, dict[str, int]]
+    has_errors: bool
     eligible_count: int | None
     total_count: int | None
     error: dict[str, str] | None
@@ -524,11 +532,11 @@ def _add_benchmark_stage_statuses(benchmark: dict[str, object]) -> dict[str, obj
 async def create_run_evaluation(
     run_id: str, payload: EvaluationRequest | None = None
 ) -> EvaluationDetailResponse:
-    """Queue independent scoring of a completed benchmark's saved retrieval.
+    """Queue independent scoring of a completed benchmark's saved outputs.
 
     Args:
         run_id: Stable identifier of the completed benchmark to score.
-        payload: Optional retrieval metric override for this attempt.
+        payload: Optional retrieval and answer metric overrides for this attempt.
 
     Returns:
         The newly queued evaluation attempt.
@@ -539,8 +547,9 @@ async def create_run_evaluation(
     # Convert repository failures into stable HTTP errors for API clients.
     try:
         selected = payload.retrieval_metrics if payload else None
+        selected_answers = payload.answer_metrics if payload else None
         return EvaluationDetailResponse.model_validate(
-            create_evaluation(run_id, selected)
+            create_evaluation(run_id, selected, selected_answers)
         )
     except EvaluationNotFoundError as error:
         raise HTTPException(

@@ -460,6 +460,8 @@ CREATE TABLE IF NOT EXISTS retrieval_evaluation (
     status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed')),
     config_json TEXT NOT NULL CHECK (json_valid(config_json)),
     aggregate_json TEXT CHECK (aggregate_json IS NULL OR json_valid(aggregate_json)),
+    coverage_json TEXT CHECK (coverage_json IS NULL OR json_valid(coverage_json)),
+    has_errors INTEGER NOT NULL DEFAULT 0 CHECK (has_errors IN (0, 1)),
     eligible_count INTEGER,
     total_count INTEGER,
     error_code TEXT,

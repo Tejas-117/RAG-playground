@@ -3,13 +3,14 @@
 import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
 from test_benchmark_runs import _experiment_configuration, _seed_ready_inputs
 
-from backend.api.routers.runs import create_run_evaluation
+from backend.api.routers.runs import EvaluationRequest, create_run_evaluation
 from backend.db.connection import connect
 from backend.db.repositories.benchmark_runs import (
     create_pending_benchmark_run,
@@ -22,7 +23,116 @@ from backend.db.repositories.retrieval_evaluations import (
     get_evaluation,
 )
 from backend.db.repositories.work_queue import claim_next_pending_work_item
+from backend.evaluation.answer import AnswerJudgeInput, AnswerJudgeResult
 from backend.evaluation.retrieval import score_question
+from backend.generation.models import (
+    GenerationProviderResponse,
+    GenerationServiceResult,
+)
+from backend.pipeline.benchmark_execution import BenchmarkExecutor
+from backend.pipeline.configs import ExperimentConfig
+
+
+class FakeAnswerJudge:
+    """Return deterministic answer judgments while recording exact inputs."""
+
+    def __init__(self, fail_on_call: int | None = None) -> None:
+        """Configure an optional deterministic provider failure.
+
+        Args:
+            fail_on_call: One-based call number that should fail when provided.
+
+        Returns:
+            None. Calls are retained for assertions.
+        """
+        # Mutable call history belongs only to this isolated test fake.
+        self.calls: list[AnswerJudgeInput] = []
+        self.fail_on_call = fail_on_call
+
+    def judge(self, judge_input: AnswerJudgeInput) -> AnswerJudgeResult:
+        """Score all requested metrics in one deterministic operation.
+
+        Args:
+            judge_input: Exact persisted material supplied by the executor.
+
+        Returns:
+            Fixed valid scores and provenance for every requested metric.
+        """
+        self.calls.append(judge_input)
+
+        # The optional failure supports partial-result coverage without network calls.
+        if self.fail_on_call == len(self.calls):
+            from backend.evaluation.answer import AnswerJudgeError
+
+            raise AnswerJudgeError("evaluator_unavailable", "Evaluator unavailable.")
+
+        return AnswerJudgeResult(
+            results={
+                metric: {
+                    "rubric_score": 3,
+                    "score": 0.75,
+                    "rationale": "Deterministic test rationale.",
+                    "evidence_ranks": [],
+                }
+                for metric in judge_input.metrics
+            },
+            duration_ms=5,
+            prompt_tokens=10,
+            completion_tokens=4,
+            total_tokens=14,
+            provider_request_id=f"judge-{len(self.calls)}",
+            provider_model="openai/gpt-oss-20b",
+        )
+
+
+def _complete_generated_benchmark(
+    answer_metrics: list[str] | None = None,
+) -> str:
+    """Create and execute a benchmark with deterministic generated answers.
+
+    Returns:
+        Stable identifier of the completed benchmark.
+    """
+    _seed_ready_inputs()
+    experiment_data = _experiment_configuration().model_dump()
+
+    # Override saved selections only when a test is exercising automatic judging.
+    if answer_metrics is not None:
+        experiment_data["evaluation"]["retrieval_metrics"] = []
+        experiment_data["evaluation"]["answer_metrics"] = answer_metrics
+
+    _, _, config = resolve_benchmark_configuration(
+        "prepared-index-1",
+        "dataset-1",
+        ExperimentConfig.model_validate(experiment_data),
+    )
+    run = create_pending_benchmark_run("prepared-index-1", "dataset-1", config)
+    claimed = claim_next_pending_work_item()
+    assert claimed == {"kind": "benchmark_run", "id": run["id"]}
+
+    def retrieve(*args: Any, **kwargs: Any) -> tuple[()]:
+        """Return empty saved retrieval for the deterministic answer fixture."""
+        return ()
+
+    def generate(*args: Any, **kwargs: Any) -> GenerationServiceResult:
+        """Return one offline generated answer without provider access."""
+        return GenerationServiceResult(
+            response=GenerationProviderResponse(
+                answer_text="Saved generated answer.",
+                provider_model="fake-model",
+                finish_reason="stop",
+            ),
+            context_chunk_ids=(),
+            prompt_template_version="test-prompt-v1",
+            provider_policy_version="test-policy-v1",
+            provider_called=False,
+        )
+
+    BenchmarkExecutor(
+        chunk_retriever=retrieve,
+        answer_generator=generate,
+    ).execute(run["id"])
+    return run["id"]
 
 
 def test_question_scores_keep_chunk_rank_and_deduplicate_recall() -> None:
@@ -157,3 +267,129 @@ def test_zero_eligible_questions_have_null_aggregates() -> None:
         assert result["eligible_count"] == 0
         assert result["total_count"] == 2
         assert result["aggregates"] == {"mrr": None, "recall_at_k": None}
+
+
+def test_answer_metrics_use_one_call_per_question_and_saved_outputs() -> None:
+    """Verify combined judge calls, answer aggregates, and request provenance.
+
+    Returns:
+        None. Assertions cover saved inputs without retrieval or generation reruns.
+    """
+    with (
+        TemporaryDirectory() as directory,
+        patch(
+            "backend.db.connection.DATABASE_PATH", Path(directory) / "answer.sqlite3"
+        ),
+    ):
+        run_id = _complete_generated_benchmark()
+        automatic = claim_next_pending_work_item()
+        assert automatic is not None
+        execute_evaluation(automatic["id"])
+        attempt = create_evaluation(
+            run_id,
+            [],
+            ["groundedness", "answer_relevance", "answer_correctness"],
+        )
+        assert claim_next_pending_work_item() == {
+            "kind": "retrieval_evaluation",
+            "id": attempt["id"],
+        }
+        judge = FakeAnswerJudge()
+        result = execute_evaluation(attempt["id"], judge)
+
+        # All three eligible metrics share one request for each persisted question.
+        assert len(judge.calls) == 2
+        assert judge.calls[0].question == "Question 0?"
+        assert judge.calls[0].answer == "Saved generated answer."
+        assert judge.calls[0].reference_answer == "Answer 0"
+        assert judge.calls[0].metrics == (
+            "groundedness",
+            "answer_relevance",
+            "answer_correctness",
+        )
+        assert result["aggregates"] == {
+            "groundedness": 0.75,
+            "answer_relevance": 0.75,
+            "answer_correctness": 0.75,
+        }
+        assert result["coverage"]["answer_correctness"]["scored"] == 2
+        assert result["questions"][0]["judge"]["provider_request_id"] == "judge-1"
+
+
+def test_answer_evaluation_keeps_partial_results_after_question_failure() -> None:
+    """Verify one judge failure retains earlier scores and completes with errors.
+
+    Returns:
+        None. Assertions cover partial aggregates and structured question errors.
+    """
+    with (
+        TemporaryDirectory() as directory,
+        patch(
+            "backend.db.connection.DATABASE_PATH", Path(directory) / "partial.sqlite3"
+        ),
+    ):
+        run_id = _complete_generated_benchmark()
+        automatic = claim_next_pending_work_item()
+        assert automatic is not None
+        execute_evaluation(automatic["id"])
+        attempt = asyncio.run(
+            create_run_evaluation(
+                run_id,
+                EvaluationRequest(
+                    retrieval_metrics=[],
+                    answer_metrics=["answer_relevance"],
+                ),
+            )
+        )
+        claim_next_pending_work_item()
+        result = execute_evaluation(attempt.id, FakeAnswerJudge(fail_on_call=2))
+
+        assert result["status"] == "completed"
+        assert result["has_errors"] is True
+        assert result["aggregates"] == {"answer_relevance": 0.75}
+        assert result["coverage"]["answer_relevance"] == {
+            "total": 2,
+            "eligible": 2,
+            "scored": 1,
+            "skipped": 0,
+            "error": 1,
+        }
+        assert result["questions"][1]["answer_error"]["code"] == (
+            "evaluator_unavailable"
+        )
+
+
+def test_answer_only_selection_is_enqueued_and_missing_reference_is_skipped() -> None:
+    """Verify automatic answer evaluation and correctness eligibility coverage.
+
+    Returns:
+        None. Assertions cover answer-only queueing and per-question reference skips.
+    """
+    with (
+        TemporaryDirectory() as directory,
+        patch("backend.db.connection.DATABASE_PATH", Path(directory) / "auto.sqlite3"),
+    ):
+        run_id = _complete_generated_benchmark(["answer_correctness"])
+        with connect() as connection:
+            connection.execute(
+                "UPDATE evaluation_example SET reference_answer = NULL WHERE id = ?",
+                ("example-1",),
+            )
+        claimed = claim_next_pending_work_item()
+        assert claimed is not None
+        judge = FakeAnswerJudge()
+        result = execute_evaluation(claimed["id"], judge)
+
+        assert result["benchmark_run_id"] == run_id
+        assert len(judge.calls) == 1
+        assert result["aggregates"] == {"answer_correctness": 0.75}
+        assert result["coverage"]["answer_correctness"] == {
+            "total": 2,
+            "eligible": 1,
+            "scored": 1,
+            "skipped": 1,
+            "error": 0,
+        }
+        assert result["questions"][1]["answer_skips"] == {
+            "answer_correctness": "no_reference_answer"
+        }

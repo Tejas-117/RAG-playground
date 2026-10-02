@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "RAG Playground — Test the path to the answer",
+  title: "RAG Playground - Test the path to the answer",
   description:
     "Configure, run, evaluate, and compare RAG experiments over your own documents.",
 };
