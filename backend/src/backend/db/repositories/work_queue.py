@@ -14,7 +14,7 @@ class ClaimedWorkItem(TypedDict):
         id: Stable identifier of the claimed persistence record.
     """
 
-    kind: Literal["benchmark_run", "prepared_index"]
+    kind: Literal["benchmark_run", "prepared_index", "retrieval_evaluation"]
     id: str
 
 
@@ -63,6 +63,9 @@ def claim_next_pending_work_item() -> ClaimedWorkItem | None:
                 UNION ALL
                 SELECT id, 'benchmark_run' AS kind, created_at
                 FROM benchmark_run WHERE status = 'pending'
+                UNION ALL
+                SELECT id, 'retrieval_evaluation' AS kind, created_at
+                FROM retrieval_evaluation WHERE status = 'pending'
             )
             ORDER BY created_at, kind, id
             LIMIT 1
@@ -83,13 +86,20 @@ def claim_next_pending_work_item() -> ClaimedWorkItem | None:
                 """,
                 (started_at, row["id"]),
             )
-        else:
+        elif row["kind"] == "benchmark_run":
             cursor = connection.execute(
                 """
                 UPDATE benchmark_run
                 SET status = 'running', current_stage = 'retrieval', started_at = ?
                 WHERE id = ? AND status = 'pending'
                 """,
+                (started_at, row["id"]),
+            )
+        else:
+            # Evaluation has its own durable lifecycle and never changes the run.
+            cursor = connection.execute(
+                """UPDATE retrieval_evaluation SET status = 'running', started_at = ?
+                   WHERE id = ? AND status = 'pending'""",
                 (started_at, row["id"]),
             )
 

@@ -452,3 +452,31 @@ CREATE TABLE IF NOT EXISTS benchmark_generation_context_chunk (
         REFERENCES benchmark_retrieved_chunk(retrieval_result_id, rank)
         ON DELETE RESTRICT
 );
+
+-- Each scoring pass is independent of the benchmark and preserves its own snapshot.
+CREATE TABLE IF NOT EXISTS retrieval_evaluation (
+    id TEXT PRIMARY KEY,
+    benchmark_run_id TEXT NOT NULL REFERENCES benchmark_run(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+    config_json TEXT NOT NULL CHECK (json_valid(config_json)),
+    aggregate_json TEXT CHECK (aggregate_json IS NULL OR json_valid(aggregate_json)),
+    eligible_count INTEGER,
+    total_count INTEGER,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_retrieval_evaluation_queue
+    ON retrieval_evaluation (status, created_at);
+
+-- Question evidence is retained even when labels are missing and scoring skips it.
+CREATE TABLE IF NOT EXISTS retrieval_evaluation_question (
+    evaluation_id TEXT NOT NULL REFERENCES retrieval_evaluation(id) ON DELETE CASCADE,
+    example_id TEXT NOT NULL REFERENCES evaluation_example(id) ON DELETE RESTRICT,
+    ordinal INTEGER NOT NULL,
+    result_json TEXT NOT NULL CHECK (json_valid(result_json)),
+    PRIMARY KEY (evaluation_id, example_id)
+);

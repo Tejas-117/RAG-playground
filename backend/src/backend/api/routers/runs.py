@@ -17,6 +17,13 @@ from backend.db.repositories.benchmark_runs import (
     list_benchmark_runs,
     resolve_benchmark_configuration,
 )
+from backend.db.repositories.retrieval_evaluations import (
+    EvaluationNotFoundError,
+    EvaluationRunStateError,
+    create_evaluation,
+    get_evaluation,
+    list_evaluations,
+)
 from backend.pipeline.compatibility import (
     InvalidPipelineConfigurationError,
     validate_pipeline_config,
@@ -229,6 +236,59 @@ class BenchmarkRunMetricsResponse(BaseModel):
     completion_token_result_count: int = Field(ge=0)
 
 
+class EvaluationRequest(BaseModel):
+    """Select retrieval metrics, or use the run snapshot when omitted.
+
+    Attributes:
+        retrieval_metrics: Optional metric override for the new scoring attempt.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    retrieval_metrics: list[Literal["hit_rate_at_k", "recall_at_k", "mrr"]] | None = (
+        None
+    )
+
+
+class EvaluationSummaryResponse(BaseModel):
+    """Describe one durable scoring attempt and its aggregate coverage.
+
+    Attributes:
+        id: Stable evaluation-attempt identifier.
+        benchmark_run_id: Completed benchmark whose saved retrieval is scored.
+        status: Independent lifecycle state of this evaluation attempt.
+        configuration: Saved retrieval and answer metric selections.
+        aggregates: Selected retrieval metric averages across eligible questions.
+        eligible_count: Questions with at least one resolved document label.
+        total_count: Total benchmark questions considered by the attempt.
+        error: Safe structured terminal error when evaluation fails.
+        created_at: Timestamp at which the attempt was queued.
+        started_at: Timestamp at which a worker claimed the attempt.
+        completed_at: Timestamp at which the attempt reached a terminal state.
+    """
+
+    id: str
+    benchmark_run_id: str
+    status: RunStatus
+    configuration: dict[str, list[str]]
+    aggregates: dict[str, float | None]
+    eligible_count: int | None
+    total_count: int | None
+    error: dict[str, str] | None
+    created_at: str
+    started_at: str | None
+    completed_at: str | None
+
+
+class EvaluationDetailResponse(EvaluationSummaryResponse):
+    """Include per-question scores, skip reasons, and ranked document evidence.
+
+    Attributes:
+        questions: Ordered question-level outcomes and source-document evidence.
+    """
+
+    questions: list[dict[str, object]]
+
+
 class BenchmarkRunSummaryResponse(BaseModel):
     """Represent one dataset-wide run without loading question-level output."""
 
@@ -250,6 +310,7 @@ class BenchmarkRunSummaryResponse(BaseModel):
     configuration: PipelineConfig
     error: RunErrorResponse | None = None
     metrics: BenchmarkRunMetricsResponse
+    latest_evaluation: EvaluationSummaryResponse | None = None
     created_at: str
     started_at: str | None = None
     completed_at: str | None = None
@@ -453,3 +514,140 @@ def _add_benchmark_stage_statuses(benchmark: dict[str, object]) -> dict[str, obj
 
     response["examples"] = examples
     return response
+
+
+@router.post(
+    "/runs/{run_id}/evaluations",
+    response_model=EvaluationDetailResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_run_evaluation(
+    run_id: str, payload: EvaluationRequest | None = None
+) -> EvaluationDetailResponse:
+    """Queue independent scoring of a completed benchmark's saved retrieval.
+
+    Args:
+        run_id: Stable identifier of the completed benchmark to score.
+        payload: Optional retrieval metric override for this attempt.
+
+    Returns:
+        The newly queued evaluation attempt.
+
+    Raises:
+        HTTPException: If the run is missing, incomplete, invalid, or cannot be saved.
+    """
+    # Convert repository failures into stable HTTP errors for API clients.
+    try:
+        selected = payload.retrieval_metrics if payload else None
+        return EvaluationDetailResponse.model_validate(
+            create_evaluation(run_id, selected)
+        )
+    except EvaluationNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "run_not_found",
+                "message": "The selected benchmark run does not exist.",
+            },
+        ) from error
+    except EvaluationRunStateError as error:
+        raise HTTPException(
+            status_code=409, detail={"code": "run_not_completed", "message": str(error)}
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_evaluation_metrics", "message": str(error)},
+        ) from error
+    except sqlite3.Error as error:
+        logger.exception("evaluation_create_failed run_id=%s", run_id)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "persistence_error",
+                "message": "The evaluation could not be queued.",
+            },
+        ) from error
+
+
+@router.get(
+    "/runs/{run_id}/evaluations", response_model=list[EvaluationSummaryResponse]
+)
+async def read_run_evaluations(run_id: str) -> list[EvaluationSummaryResponse]:
+    """Return all attempts for one benchmark, newest first.
+
+    Args:
+        run_id: Stable benchmark identifier whose evaluation history is requested.
+
+    Returns:
+        Compact evaluation attempts ordered newest first.
+
+    Raises:
+        HTTPException: If the run is missing or its history cannot be read.
+    """
+    # Validate each repository dictionary against the public response contract.
+    try:
+        return [
+            EvaluationSummaryResponse.model_validate(item)
+            for item in list_evaluations(run_id)
+        ]
+    except EvaluationNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "run_not_found",
+                "message": "The selected benchmark run does not exist.",
+            },
+        ) from error
+    except sqlite3.Error as error:
+        logger.exception("evaluation_list_failed run_id=%s", run_id)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "persistence_error",
+                "message": "Evaluations could not be loaded.",
+            },
+        ) from error
+
+
+@router.get(
+    "/runs/{run_id}/evaluations/{evaluation_id}",
+    response_model=EvaluationDetailResponse,
+)
+async def read_run_evaluation(
+    run_id: str, evaluation_id: str
+) -> EvaluationDetailResponse:
+    """Return one attempt and its saved per-question scoring evidence.
+
+    Args:
+        run_id: Stable identifier of the parent benchmark.
+        evaluation_id: Stable identifier of the requested scoring attempt.
+
+    Returns:
+        Evaluation detail with ordered question-level evidence.
+
+    Raises:
+        HTTPException: If the attempt is missing or cannot be read.
+    """
+    # Keep an attempt scoped to its parent run when resolving the resource.
+    try:
+        return EvaluationDetailResponse.model_validate(
+            get_evaluation(run_id, evaluation_id)
+        )
+    except EvaluationNotFoundError as error:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "evaluation_not_found",
+                "message": "The selected evaluation does not exist.",
+            },
+        ) from error
+    except sqlite3.Error as error:
+        logger.exception("evaluation_read_failed evaluation_id=%s", evaluation_id)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "persistence_error",
+                "message": "The evaluation could not be loaded.",
+            },
+        ) from error

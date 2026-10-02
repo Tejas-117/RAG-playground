@@ -4,6 +4,10 @@ import asyncio
 import logging
 from collections.abc import Callable
 
+from backend.db.repositories.retrieval_evaluations import (
+    execute_evaluation,
+    fail_evaluation,
+)
 from backend.db.repositories.work_queue import claim_next_pending_work_item
 from backend.pipeline.benchmark_execution import (
     BenchmarkExecutor,
@@ -80,8 +84,13 @@ class PipelineRunWorker:
                 # Route the claimed durable row to its independently testable executor.
                 if work_kind == "prepared_index":
                     executor = self._prepared_index_executor_factory()
-                else:
+                elif work_kind == "benchmark_run":
                     executor = self._benchmark_executor_factory()
+
+                else:
+                    # Saved scoring uses no provider or vector-store adapters.
+                    await asyncio.to_thread(execute_evaluation, work_id)
+                    continue
 
                 # Parsing, provider HTTP, Chroma, and persistence are synchronous.
                 await asyncio.to_thread(executor.execute, work_id)
@@ -104,6 +113,9 @@ class PipelineRunWorker:
                 )
             except Exception:
                 # Preserve the worker loop if an unexpected boundary escapes the executor.
+                # Evaluation failures are persisted here because its scorer is a function.
+                if work_kind == "retrieval_evaluation":
+                    fail_evaluation(work_id)
                 logger.exception(
                     "pipeline_worker_unhandled_failure work_kind=%s work_id=%s",
                     work_kind,

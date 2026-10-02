@@ -240,6 +240,8 @@ def test_benchmark_reuses_ready_index_for_all_dataset_examples() -> None:
             for example in completed["examples"]
         )
         assert completed["vector_index_id"] == "vector-index-1"
+        assert completed["latest_evaluation"]["status"] == "pending"
+        assert claim_next_pending_work_item()["kind"] == "retrieval_evaluation"
 
         # The complete repository shape must satisfy the public polling contract.
         response = BenchmarkRunResponse.model_validate(

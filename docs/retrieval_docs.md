@@ -63,3 +63,23 @@ The runs API exposes retrieval lifecycle, result summary, labelled raw-distance
 semantics, and hydrated ranked chunks with document, page, offset, and parser
 provenance. Generation records which of these ranks were actually included in
 its bounded prompt.
+# Saved retrieval evaluation
+
+Completed benchmark runs automatically queue a retrieval evaluation when their saved
+configuration selects retrieval metrics. The scoring worker reads only saved ranked
+chunks and resolved dataset document labels. It does not call embedding, vector store,
+or generation providers. A failed evaluation leaves the completed benchmark intact.
+
+`POST /runs/{run_id}/evaluations` queues another attempt for a completed run. An empty
+body uses the run's saved retrieval metric selection; `retrieval_metrics` may override
+it with `hit_rate_at_k`, `recall_at_k`, or `mrr`. `GET /runs/{run_id}/evaluations`
+lists attempts; `GET /runs/{run_id}/evaluations/{evaluation_id}` includes saved
+per-question evidence. Run list and detail responses include `latest_evaluation`.
+
+K is the saved retrieval `top_k`. Hit Rate@K is one when any relevant document
+appears, Recall@K is the fraction of distinct labelled documents found, and MRR is
+the reciprocal rank of the first matching chunk. Repeated chunks preserve their
+rank and count their source document once for recall. Questions with no resolved
+document labels are skipped; labelled questions with no hits score zero. Aggregates
+average over eligible questions and are `null` when none are eligible. Answer metric
+selections remain in the snapshot but are not evaluated in this release.

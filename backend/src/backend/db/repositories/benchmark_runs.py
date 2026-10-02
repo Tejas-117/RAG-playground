@@ -7,6 +7,10 @@ from typing import Any
 from uuid import uuid4
 
 from backend.db.connection import connect
+from backend.db.repositories.retrieval_evaluations import (
+    enqueue_saved_evaluation,
+    latest_evaluation,
+)
 from backend.generation.models import GenerationServiceResult
 from backend.pipeline.configs import ExperimentConfig, PipelineConfig, PreparationConfig
 from backend.retrieval.models import HydratedVectorSearchHit
@@ -605,6 +609,15 @@ def complete_benchmark_run(benchmark_run_id: str, duration_ms: int) -> dict[str,
                 f"Benchmark run '{benchmark_run_id}' could not complete."
             )
 
+        # Queue scoring with the benchmark transition so a crash cannot lose it.
+        row = connection.execute(
+            "SELECT effective_config_json FROM benchmark_run WHERE id = ?",
+            (benchmark_run_id,),
+        ).fetchone()
+        enqueue_saved_evaluation(
+            connection, benchmark_run_id, row["effective_config_json"]
+        )
+
     return get_benchmark_run(benchmark_run_id)
 
 
@@ -757,7 +770,12 @@ def list_benchmark_runs() -> list[dict[str, Any]]:
             + " ORDER BY benchmark_run.created_at DESC, benchmark_run.id DESC"
         ).fetchall()
 
-    return [_benchmark_summary_from_row(row) for row in rows]
+        summaries = [_benchmark_summary_from_row(row) for row in rows]
+        # Keep attempts compact in the inventory response.
+        for summary in summaries:
+            summary["latest_evaluation"] = latest_evaluation(connection, summary["id"])
+
+    return summaries
 
 
 def get_benchmark_run(benchmark_run_id: str) -> dict[str, Any]:
@@ -791,11 +809,13 @@ def get_benchmark_run(benchmark_run_id: str) -> dict[str, Any]:
         result_examples = [
             _materialize_example(connection, example) for example in examples
         ]
+        latest = latest_evaluation(connection, benchmark_run_id)
 
     response = _benchmark_summary_from_row(run)
     response["configuration"] = json.loads(run["effective_config_json"])
     response["examples"] = result_examples
     response["error"] = _materialize_error(run)
+    response["latest_evaluation"] = latest
     return response
 
 

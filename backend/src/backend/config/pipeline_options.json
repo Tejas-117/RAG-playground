@@ -146,19 +146,19 @@
         "value": "hit_rate_at_k",
         "label": "Hit Rate@K",
         "description": "Checks whether any labelled relevant document appears in the top K.",
-        "selected_by_default": false
+        "selected_by_default": true
       },
       {
         "value": "mrr",
         "label": "MRR",
         "description": "Rewards placing the first relevant document higher in the ranking.",
-        "selected_by_default": false
+        "selected_by_default": true
       },
       {
         "value": "recall_at_k",
         "label": "Recall@K",
         "description": "Measures how many labelled relevant documents appear in the top K.",
-        "selected_by_default": false
+        "selected_by_default": true
       }
     ],
     "answer_metrics": [
