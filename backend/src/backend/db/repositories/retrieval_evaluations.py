@@ -11,7 +11,7 @@ from backend.evaluation.answer import (
     AnswerJudge,
     AnswerJudgeError,
     AnswerJudgeInput,
-    GroqAnswerJudge,
+    OpenRouterAnswerJudge,
     evaluator_snapshot,
 )
 from backend.evaluation.retrieval import METRICS, score_question
@@ -422,7 +422,7 @@ def execute_evaluation(
         }
         for metric in all_metrics
     }
-    judge = answer_judge or (GroqAnswerJudge() if selected_answers else None)
+    judge = answer_judge or (OpenRouterAnswerJudge() if selected_answers else None)
     has_errors = False
 
     # Score each question and commit it before beginning another paid request.

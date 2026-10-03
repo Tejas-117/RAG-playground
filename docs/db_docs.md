@@ -319,9 +319,10 @@ although each attempt can now contain retrieval metrics, answer metrics, or both
 | `error_code` / `error_message` | Safe structured terminal attempt failure. |
 | `created_at`, `started_at`, `completed_at` | Independent evaluation lifecycle timestamps. |
 
-Answer metrics use the fixed Groq `openai/gpt-oss-20b` evaluator with temperature
-zero, low reasoning effort, strict JSON Schema output, and no automatic paid-call
-retry. The server reads `GROQ_API_KEY` only when an attempt selects answer metrics.
+Answer metrics use the fixed OpenRouter `qwen/qwen3.8-27b:free` evaluator with
+temperature zero, reasoning disabled, strict JSON Schema output, and no automatic
+application retry. The server reads `OPENROUTER_API_KEY` only when an attempt selects
+answer metrics.
 The versioned rubric returns an integer from zero through four, stored alongside
 its normalized zero-to-one score and short rationale. Groundedness also retains
 one-based ranks into the exact generation context.

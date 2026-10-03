@@ -20,6 +20,7 @@ Create the ignored file `backend/.env` locally:
 
 ```env
 GROQ_API_KEY=replace-with-your-key
+OPENROUTER_API_KEY=replace-with-your-openrouter-key
 ```
 
 The adapter loads this file without overriding an existing process environment
@@ -27,6 +28,11 @@ value. The key is never accepted in a run payload, persisted, returned, or
 logged. A missing or rejected key fails only the run that reaches generation;
 it does not prevent backend startup. Never commit this file or paste a live key
 into source code, logs, documentation, or chat.
+
+`OPENROUTER_API_KEY` is used only by answer evaluation. The fixed evaluator is
+OpenRouter's `qwen/qwen3.8-27b:free`; its `:free` suffix is intentional. Evaluation
+requests use strict JSON Schema output, temperature zero, and disabled reasoning.
+OpenRouter free-model quotas may still rate-limit an evaluation attempt.
 
 Ollama generation calls `POST /api/chat` with `stream: false`. The backend does
 not install models or start Ollama. Install the selected models separately:

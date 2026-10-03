@@ -7,15 +7,15 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Protocol
 
-import groq
+import httpx
 from dotenv import load_dotenv
 
 # These answer metrics are supported by the first versioned judge rubric.
 ANSWER_METRICS = ("groundedness", "answer_relevance", "answer_correctness")
 
 # The evaluator is fixed so attempts remain comparable within this release.
-EVALUATOR_PROVIDER = "groq"
-EVALUATOR_MODEL = "openai/gpt-oss-20b"
+EVALUATOR_PROVIDER = "openrouter"
+EVALUATOR_MODEL = "qwen/qwen3.8-27b:free"
 EVALUATOR_PROMPT_VERSION = "answer-judge-v1"
 EVALUATOR_RUBRIC_VERSION = "answer-rubric-0-to-4-v1"
 
@@ -23,6 +23,9 @@ EVALUATOR_RUBRIC_VERSION = "answer-rubric-0-to-4-v1"
 EVALUATOR_MAX_OUTPUT_TOKENS = 700
 EVALUATOR_TIMEOUT_SECONDS = 120.0
 MAX_RATIONALE_CHARACTERS = 1000
+
+# OpenRouter exposes an OpenAI-compatible non-streaming chat-completions endpoint.
+OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Local development credentials remain server-side in the backend environment file.
 BACKEND_ENV_PATH = Path(__file__).resolve().parents[3] / ".env"
@@ -104,20 +107,26 @@ class AnswerJudge(Protocol):
         ...
 
 
-class GroqAnswerJudge:
-    """Evaluate generated answers through Groq strict structured output."""
+class OpenRouterAnswerJudge:
+    """Evaluate generated answers with Qwen through OpenRouter."""
 
-    def __init__(self, client: Any | None = None) -> None:
-        """Configure an injectable synchronous Groq client.
+    def __init__(
+        self,
+        client: Any | None = None,
+        api_key: str | None = None,
+    ) -> None:
+        """Configure an injectable synchronous HTTP client.
 
         Args:
             client: Optional fake or configured client used by offline tests.
+            api_key: Optional explicit credential used by offline tests.
 
         Returns:
             None. A production client is created lazily on the first request.
         """
-        # Lazy creation lets retrieval-only evaluation work without Groq credentials.
+        # Lazy creation lets retrieval-only evaluation work without OpenRouter credentials.
         self._client = client
+        self._api_key_override = api_key
 
     def judge(self, judge_input: AnswerJudgeInput) -> AnswerJudgeResult:
         """Request and validate one structured multi-metric judgment.
@@ -132,52 +141,42 @@ class GroqAnswerJudge:
             AnswerJudgeError: If credentials, transport, or response data fail.
         """
         request = self._request_arguments(judge_input)
+        api_key = self._api_key()
         started_at = perf_counter()
 
         try:
-            # The worker invokes this synchronous SDK request outside DB transactions.
-            response = (self._client or self._create_client()).chat.completions.create(
-                **request
-            )
-        except (groq.AuthenticationError, groq.PermissionDeniedError) as error:
-            raise AnswerJudgeError(
-                "evaluator_authentication_failed",
-                "The answer evaluator rejected backend authentication.",
-            ) from error
-        except groq.APITimeoutError as error:
+            # The worker invokes this synchronous HTTP request outside DB transactions.
+            response = self._post(request, api_key)
+        except httpx.TimeoutException as error:
             raise AnswerJudgeError(
                 "evaluator_timeout", "The answer evaluator request timed out."
             ) from error
-        except groq.RateLimitError as error:
-            raise AnswerJudgeError(
-                "evaluator_rate_limited", "The answer evaluator rate limit was reached."
-            ) from error
-        except (groq.APIConnectionError, groq.APIStatusError) as error:
+        except httpx.RequestError as error:
             raise AnswerJudgeError(
                 "evaluator_unavailable",
                 "The answer evaluator could not complete the request.",
             ) from error
-        except groq.APIResponseValidationError as error:
-            raise AnswerJudgeError(
-                "invalid_evaluator_response",
-                "The answer evaluator returned an invalid response.",
-            ) from error
 
         duration_ms = max(0, round((perf_counter() - started_at) * 1000))
+        self._raise_for_status(response)
         return self._validate_response(response, judge_input, duration_ms)
 
-    def _create_client(self) -> groq.Groq:
-        """Create a bounded Groq client with automatic retries disabled.
+    def _api_key(self) -> str:
+        """Load the server-side OpenRouter credential.
 
         Returns:
-            Authenticated Groq SDK client.
+            Non-empty OpenRouter API key.
 
         Raises:
             AnswerJudgeError: If the server-side API key is unavailable.
         """
-        # Deployment environment values take precedence over the local file.
-        load_dotenv(BACKEND_ENV_PATH, override=False)
-        api_key = os.getenv("GROQ_API_KEY", "").strip()
+        # Explicit injection keeps unit tests offline without mutating process state.
+        if self._api_key_override is not None:
+            api_key = self._api_key_override.strip()
+        else:
+            # Deployment environment values take precedence over the local file.
+            load_dotenv(BACKEND_ENV_PATH, override=False)
+            api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
 
         # Missing credentials affect answer evaluation without changing the benchmark.
         if not api_key:
@@ -186,11 +185,79 @@ class GroqAnswerJudge:
                 "The answer evaluator API key is not configured.",
             )
 
-        return groq.Groq(
-            api_key=api_key,
-            timeout=EVALUATOR_TIMEOUT_SECONDS,
-            max_retries=0,
-        )
+        return api_key
+
+    def _post(self, request: dict[str, object], api_key: str) -> httpx.Response:
+        """Send one OpenRouter request without automatic application retries.
+
+        Args:
+            request: OpenAI-compatible chat-completion body.
+            api_key: Server-side OpenRouter bearer token.
+
+        Returns:
+            Unparsed HTTP response from OpenRouter.
+        """
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        # Reuse an injected test client; otherwise close the short-lived real client.
+        if self._client is not None:
+            return self._client.post(
+                OPENROUTER_CHAT_COMPLETIONS_URL,
+                headers=headers,
+                json=request,
+            )
+
+        with httpx.Client(timeout=EVALUATOR_TIMEOUT_SECONDS) as client:
+            return client.post(
+                OPENROUTER_CHAT_COMPLETIONS_URL,
+                headers=headers,
+                json=request,
+            )
+
+    def _raise_for_status(self, response: httpx.Response) -> None:
+        """Translate OpenRouter HTTP failures into stable evaluator errors.
+
+        Args:
+            response: OpenRouter HTTP response to classify.
+
+        Returns:
+            None when the response status is successful.
+
+        Raises:
+            AnswerJudgeError: If OpenRouter rejected or failed the request.
+        """
+        status_code = response.status_code
+
+        # Authentication and key permission failures share one safe public category.
+        if status_code in {401, 403}:
+            raise AnswerJudgeError(
+                "evaluator_authentication_failed",
+                "The answer evaluator rejected backend authentication.",
+            )
+
+        # Free model quotas and provider throttles are surfaced distinctly.
+        if status_code == 429:
+            raise AnswerJudgeError(
+                "evaluator_rate_limited",
+                "The answer evaluator rate limit was reached.",
+            )
+
+        # Server and routing failures indicate temporary evaluator unavailability.
+        if status_code >= 500:
+            raise AnswerJudgeError(
+                "evaluator_unavailable",
+                "The answer evaluator could not complete the request.",
+            )
+
+        # Other non-success responses indicate a rejected evaluator request.
+        if status_code >= 400:
+            raise AnswerJudgeError(
+                "evaluator_request_rejected",
+                "The answer evaluator rejected the request.",
+            )
 
     def _request_arguments(self, judge_input: AnswerJudgeInput) -> dict[str, object]:
         """Build the fixed prompt and strict response schema for one question.
@@ -199,7 +266,7 @@ class GroqAnswerJudge:
             judge_input: Exact persisted inputs and requested metrics.
 
         Returns:
-            Groq chat-completion keyword arguments.
+            OpenRouter chat-completion JSON body.
         """
         metric_instructions = {
             "groundedness": (
@@ -272,8 +339,7 @@ class GroqAnswerJudge:
             "temperature": 0,
             "max_completion_tokens": EVALUATOR_MAX_OUTPUT_TOKENS,
             "stream": False,
-            "include_reasoning": False,
-            "reasoning_effort": "low",
+            "reasoning": {"enabled": False},
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -293,7 +359,7 @@ class GroqAnswerJudge:
         """Validate the untrusted structured response and evidence ranks.
 
         Args:
-            response: Groq SDK completion response.
+            response: OpenRouter HTTP response.
             judge_input: Inputs used to validate metric identities and citations.
             duration_ms: Measured request duration in milliseconds.
 
@@ -305,14 +371,15 @@ class GroqAnswerJudge:
         """
         try:
             # Strict output controls shape, while local checks enforce cross-field rules.
-            content = response.choices[0].message.content
+            response_payload = response.json()
+            content = response_payload["choices"][0]["message"]["content"]
             payload = json.loads(content)
             raw_results = payload["results"]
         except (
-            AttributeError,
             IndexError,
             KeyError,
             TypeError,
+            ValueError,
             json.JSONDecodeError,
         ) as error:
             raise AnswerJudgeError(
@@ -381,15 +448,15 @@ class GroqAnswerJudge:
                 "The answer evaluator omitted a requested metric.",
             )
 
-        usage = getattr(response, "usage", None)
+        usage = response_payload.get("usage")
         return AnswerJudgeResult(
             results=results,
             duration_ms=duration_ms,
             prompt_tokens=self._optional_tokens(usage, "prompt_tokens"),
             completion_tokens=self._optional_tokens(usage, "completion_tokens"),
             total_tokens=self._optional_tokens(usage, "total_tokens"),
-            provider_request_id=self._optional_string(response, "id"),
-            provider_model=self._optional_string(response, "model"),
+            provider_request_id=self._optional_string(response_payload, "id"),
+            provider_model=self._optional_string(response_payload, "model"),
         )
 
     def _optional_tokens(self, value: Any, attribute: str) -> int | None:
@@ -402,7 +469,7 @@ class GroqAnswerJudge:
         Returns:
             Valid count or ``None`` when omitted.
         """
-        result = getattr(value, attribute, None) if value is not None else None
+        result = value.get(attribute) if isinstance(value, dict) else None
         return (
             result
             if isinstance(result, int) and not isinstance(result, bool) and result >= 0
@@ -419,7 +486,7 @@ class GroqAnswerJudge:
         Returns:
             Stripped value or ``None`` when absent or invalid.
         """
-        result = getattr(value, attribute, None)
+        result = value.get(attribute) if isinstance(value, dict) else None
         return result.strip() if isinstance(result, str) and result.strip() else None
 
 
@@ -434,7 +501,8 @@ def evaluator_snapshot() -> dict[str, object]:
         "provider": EVALUATOR_PROVIDER,
         "model": EVALUATOR_MODEL,
         "temperature": 0,
-        "reasoning_effort": "low",
+        # Retain the public field name used by the evaluation API and frontend.
+        "reasoning_effort": "disabled",
         "structured_output": "strict_json_schema",
         "prompt_version": EVALUATOR_PROMPT_VERSION,
         "rubric_version": EVALUATOR_RUBRIC_VERSION,

@@ -9,7 +9,7 @@ from backend.db.repositories.retrieval_evaluations import (
     fail_evaluation,
 )
 from backend.db.repositories.work_queue import claim_next_pending_work_item
-from backend.evaluation.answer import AnswerJudge, GroqAnswerJudge
+from backend.evaluation.answer import AnswerJudge, OpenRouterAnswerJudge
 from backend.pipeline.benchmark_execution import (
     BenchmarkExecutor,
     get_benchmark_executor,
@@ -39,7 +39,7 @@ class PipelineRunWorker:
         benchmark_executor_factory: Callable[[], BenchmarkExecutor] = (
             get_benchmark_executor
         ),
-        answer_judge_factory: Callable[[], AnswerJudge] = GroqAnswerJudge,
+        answer_judge_factory: Callable[[], AnswerJudge] = OpenRouterAnswerJudge,
     ) -> None:
         """Configure the stateless executor factory used for each claimed run.
 
