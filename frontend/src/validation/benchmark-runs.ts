@@ -14,13 +14,35 @@ export const retrievalMetricSchema = z.enum([
   "mrr",
 ]);
 
+/** Answer metrics are normalized judgments produced by the configured LLM evaluator. */
+export const answerMetricSchema = z.enum([
+  "groundedness",
+  "answer_relevance",
+  "answer_correctness",
+]);
+
+/** Every supported metric may be selected in a combined evaluation attempt. */
+export const evaluationMetricSchema = z.union([
+  retrievalMetricSchema,
+  answerMetricSchema,
+]);
+
 /** Lifecycle states shared by benchmarks and their independent evaluation attempts. */
 const lifecycleStatusSchema = z.enum(["pending", "running", "completed", "failed"]);
 
-/** Runtime contract for one retrieval evaluation configuration snapshot. */
+/** Runtime contract for one combined evaluation configuration snapshot. */
 const retrievalEvaluationConfigurationSchema = z.object({
   retrieval_metrics: z.array(retrievalMetricSchema),
-  answer_metrics: z.array(z.string().min(1)),
+  answer_metrics: z.array(answerMetricSchema),
+  evaluator: z.object({
+    provider: z.string().min(1),
+    model: z.string().min(1),
+    temperature: z.number(),
+    reasoning_effort: z.string().min(1),
+    structured_output: z.string().min(1),
+    prompt_version: z.string().min(1),
+    rubric_version: z.string().min(1),
+  }).nullable(),
 });
 
 /** Scores stay within the normalized zero-to-one range or remain unavailable. */
@@ -28,8 +50,20 @@ const evaluationScoreSchema = z.number().min(0).max(1).nullable();
 
 /** Selected metrics form a partial record because each attempt can choose a subset. */
 const evaluationAggregatesSchema = z.partialRecord(
-  retrievalMetricSchema,
+  evaluationMetricSchema,
   evaluationScoreSchema,
+);
+
+/** Coverage distinguishes ineligible inputs from judge failures and valid scores. */
+const evaluationCoverageSchema = z.partialRecord(
+  evaluationMetricSchema,
+  z.object({
+    total: countSchema,
+    eligible: countSchema,
+    scored: countSchema,
+    skipped: countSchema,
+    error: countSchema,
+  }),
 );
 
 /** Runtime contract for a durable evaluation attempt without question-level evidence. */
@@ -39,6 +73,8 @@ export const retrievalEvaluationSummarySchema = z.object({
   status: lifecycleStatusSchema,
   configuration: retrievalEvaluationConfigurationSchema,
   aggregates: evaluationAggregatesSchema,
+  coverage: evaluationCoverageSchema,
+  has_errors: z.boolean(),
   eligible_count: countSchema.nullable(),
   total_count: countSchema.nullable(),
   error: z.object({
@@ -62,6 +98,32 @@ const retrievalEvaluationQuestionSchema = z.object({
   matching_ranks: z.array(z.number().int().positive()),
   relevant_document_ids: z.array(z.string().min(1)),
   ranked_document_ids: z.array(z.string().min(1)),
+  answer_scores: z.partialRecord(
+    answerMetricSchema,
+    z.object({
+      rubric_score: z.number().int().min(0).max(4),
+      score: z.number().min(0).max(1),
+      rationale: z.string().min(1),
+      evidence_ranks: z.array(z.number().int().positive()),
+    }),
+  ),
+  answer_skips: z.partialRecord(
+    answerMetricSchema,
+    z.enum(["no_generated_answer", "no_reference_answer"]),
+  ),
+  answer_error: z.object({
+    code: z.string().min(1),
+    message: z.string().min(1),
+    metrics: z.array(answerMetricSchema),
+  }).nullable(),
+  judge: z.object({
+    duration_ms: countSchema.nullable(),
+    prompt_tokens: countSchema.nullable(),
+    completion_tokens: countSchema.nullable(),
+    total_tokens: countSchema.nullable(),
+    provider_request_id: z.string().nullable(),
+    provider_model: z.string().nullable(),
+  }).nullable(),
 });
 
 /** Runtime contract for one attempt including its ordered per-question evidence. */
@@ -204,6 +266,12 @@ export type RetrievalEvaluationDetail = z.infer<typeof retrievalEvaluationDetail
 
 /** Stable metric identifiers accepted by the retrieval evaluation endpoint. */
 export type RetrievalMetric = z.infer<typeof retrievalMetricSchema>;
+
+/** Stable answer metric identifiers accepted by the evaluation endpoint. */
+export type AnswerMetric = z.infer<typeof answerMetricSchema>;
+
+/** Stable identifiers shared by aggregate, coverage, and question results. */
+export type EvaluationMetric = z.infer<typeof evaluationMetricSchema>;
 
 /** Validate an unknown GET /runs body; returns summaries or throws a safe error. */
 export function parseBenchmarkRuns(value: unknown): BenchmarkRunSummary[] {

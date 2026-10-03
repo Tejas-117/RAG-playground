@@ -17,10 +17,10 @@ import WorkbenchGridCanvas from "@/components/workbench-grid-canvas";
 import {
   EvaluationSummaryCard,
   QuestionEvaluationPanel,
-  RetrievalEvaluationWorkspace,
+  EvaluationWorkspace,
 } from "@/components/retrieval-evaluation-workspace";
 import { useRunDetail } from "@/lib/use-run-detail";
-import { useRetrievalEvaluations } from "@/lib/use-retrieval-evaluations";
+import { useEvaluations } from "@/lib/use-retrieval-evaluations";
 import type { BenchmarkRunDetail } from "@/validation/benchmark-runs";
 import type { RetrievalEvaluationDetail } from "@/validation/benchmark-runs";
 import styles from "./run-detail-workbench.module.css";
@@ -62,11 +62,13 @@ function EvidenceChunk({
   metric,
   contextOrder,
   isRelevantMatch,
+  isGroundedEvidence,
 }: {
   chunk: RunChunk;
   metric: string;
   contextOrder: number | null;
   isRelevantMatch: boolean;
+  isGroundedEvidence: boolean;
 }) {
   return (
     <article className={styles.chunk} data-relevant-match={isRelevantMatch}>
@@ -86,6 +88,11 @@ function EvidenceChunk({
         {isRelevantMatch && (
           <span className={styles.relevantBadge}>
             Relevant label match
+          </span>
+        )}
+        {isGroundedEvidence && (
+          <span className={styles.groundedBadge}>
+            Groundedness evidence
           </span>
         )}
       </div>
@@ -207,7 +214,12 @@ function QuestionInspector({
 
       {/* Evaluation connects selected metrics to labels and preserved chunk ranks. */}
       <QuestionEvaluationPanel
-        chunks={retrieval?.chunks ?? []}
+        chunks={(retrieval?.chunks ?? []).map((chunk) => ({
+          ...chunk,
+          context_order: generation?.context_chunks.find((item) =>
+            item.chunk_id === chunk.chunk_id && item.retrieval_rank === chunk.rank
+          )?.ordinal ?? null,
+        }))}
         evaluation={evaluation}
         outcome={evaluationQuestion}
         topK={topK}
@@ -231,15 +243,24 @@ function QuestionInspector({
         {retrieval && retrieval.chunks.length > 0 ? (
           <div className={styles.chunkList}>
             {retrieval.chunks.map((chunk) => (
-              <EvidenceChunk
+              (() => {
+                const contextOrder = generation?.context_chunks.find((item) =>
+                  item.chunk_id === chunk.chunk_id && item.retrieval_rank === chunk.rank
+                )?.ordinal ?? null;
+                const groundedRanks = evaluationQuestion
+                  ?.answer_scores.groundedness?.evidence_ranks ?? [];
+
+                return <EvidenceChunk
                 key={chunk.chunk_id}
                 chunk={chunk}
                 metric={retrieval.distance_metric}
-                contextOrder={generation?.context_chunks.find((item) =>
-                  item.chunk_id === chunk.chunk_id && item.retrieval_rank === chunk.rank
-                )?.ordinal ?? null}
+                contextOrder={contextOrder}
+                isGroundedEvidence={
+                  contextOrder !== null && groundedRanks.includes(contextOrder)
+                }
                 isRelevantMatch={evaluationQuestion?.matching_ranks.includes(chunk.rank) ?? false}
-              />
+                />;
+              })()
             ))}
           </div>
         ) : (
@@ -265,7 +286,7 @@ export default function RunDetailWorkbench({ requestedRunId }: { requestedRunId:
     : "";
 
   // Evaluation history and selected evidence remain independent from benchmark polling.
-  const evaluationState = useRetrievalEvaluations(
+  const evaluationState = useEvaluations(
     requestedRunId,
     run !== null,
     latestEvaluationMarker,
@@ -475,9 +496,10 @@ export default function RunDetailWorkbench({ requestedRunId }: { requestedRunId:
         </details>
 
         {/* The evaluation ledger keeps repeatable scoring separate from run execution. */}
-        <RetrievalEvaluationWorkspace
+        <EvaluationWorkspace
           runStatus={run.status}
-          savedMetrics={run.configuration.evaluation.retrieval_metrics}
+          savedRetrievalMetrics={run.configuration.evaluation.retrieval_metrics}
+          savedAnswerMetrics={run.configuration.evaluation.answer_metrics}
           state={evaluationState}
           topK={run.configuration.retrieval.top_k}
         />

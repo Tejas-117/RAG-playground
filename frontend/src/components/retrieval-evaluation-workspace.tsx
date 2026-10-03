@@ -9,10 +9,12 @@ import {
   FiRefreshCw,
   FiTarget,
 } from "react-icons/fi";
-import type { RetrievalEvaluationsState } from "@/lib/use-retrieval-evaluations";
+import type { EvaluationsState } from "@/lib/use-retrieval-evaluations";
 import type {
   RetrievalEvaluationDetail,
   RetrievalEvaluationSummary,
+  AnswerMetric,
+  EvaluationMetric,
   RetrievalMetric,
 } from "@/validation/benchmark-runs";
 import styles from "./retrieval-evaluation-workspace.module.css";
@@ -24,12 +26,21 @@ const RETRIEVAL_METRICS: RetrievalMetric[] = [
   "mrr",
 ];
 
+/** Stable judge-metric order matches the experiment configuration catalog. */
+const ANSWER_METRICS: AnswerMetric[] = [
+  "groundedness",
+  "answer_relevance",
+  "answer_correctness",
+];
+
 type EvaluationQuestion = RetrievalEvaluationDetail["questions"][number];
 
 type RankedChunk = {
   rank: number;
+  chunk_id: string;
   source_document_id: string;
   original_filename: string;
+  context_order?: number | null;
 };
 
 /**
@@ -52,6 +63,20 @@ export function metricLabel(metric: RetrievalMetric, topK: number): string {
   return "MRR";
 }
 
+/** Convert any supported metric identifier into a concise audit-ledger label. */
+function evaluationMetricLabel(metric: EvaluationMetric, topK: number): string {
+  // Retrieval labels include the immutable cutoff while answer labels name the judgment.
+  if (RETRIEVAL_METRICS.includes(metric as RetrievalMetric)) {
+    return metricLabel(metric as RetrievalMetric, topK);
+  }
+
+  return metric === "groundedness"
+    ? "Groundedness"
+    : metric === "answer_relevance"
+      ? "Answer relevance"
+      : "Answer correctness";
+}
+
 /**
  * Format a normalized metric value while keeping missing results visibly unavailable.
  *
@@ -66,6 +91,21 @@ export function metricValue(metric: RetrievalMetric, value: number | null): stri
   }
 
   return metric === "mrr" ? value.toFixed(3) : `${(value * 100).toFixed(1)}%`;
+}
+
+/** Format all normalized aggregates consistently while preserving MRR convention. */
+function evaluationMetricValue(metric: EvaluationMetric, value: number | null): string {
+  return metricValue(metric as RetrievalMetric, value);
+}
+
+/** Return selected metrics in retrieval-then-answer display order. */
+function selectedMetrics(
+  evaluation: RetrievalEvaluationSummary,
+): EvaluationMetric[] {
+  return [
+    ...evaluation.configuration.retrieval_metrics,
+    ...evaluation.configuration.answer_metrics,
+  ];
 }
 
 /**
@@ -115,12 +155,12 @@ export function EvaluationSummaryCard({
       <article className={className}>
         <span className={styles.eyebrow}>Evaluation status</span>
         <strong className={styles.summaryState}>Not requested</strong>
-        <p>No retrieval evaluation attempt is saved for this run.</p>
+        <p>No evaluation attempt is saved for this run.</p>
       </article>
     );
   }
 
-  const selectedMetrics = evaluation.configuration.retrieval_metrics;
+  const metrics = selectedMetrics(evaluation);
 
   return (
     <article className={className}>
@@ -135,20 +175,22 @@ export function EvaluationSummaryCard({
       </div>
       {evaluation.status === "completed" ? (
         <div className={styles.summaryScores}>
-          {selectedMetrics.map((metric) => (
+          {metrics.map((metric) => (
             <span key={metric}>
-              <b>{metricValue(metric, evaluation.aggregates[metric] ?? null)}</b>
-              <small>{metricLabel(metric, topK)}</small>
+              <b>{evaluationMetricValue(metric, evaluation.aggregates[metric] ?? null)}</b>
+              <small>{evaluationMetricLabel(metric, topK)}</small>
             </span>
           ))}
         </div>
       ) : null}
       <p>
         {evaluation.status === "completed"
-          ? `${evaluation.eligible_count ?? 0} of ${evaluation.total_count ?? 0} eligible`
+          ? evaluation.has_errors
+            ? "Partial results · some judge requests failed"
+            : `${evaluation.eligible_count ?? 0} of ${evaluation.total_count ?? 0} eligible`
           : evaluation.status === "failed"
             ? evaluation.error?.message ?? "Evaluation failed."
-            : "Scoring saved retrieval ranks."}
+            : "Scoring saved retrieval and generation results."}
       </p>
     </article>
   );
@@ -167,7 +209,7 @@ function AttemptDetail({
   detail: RetrievalEvaluationDetail;
   topK: number;
 }) {
-  const selectedMetrics = detail.configuration.retrieval_metrics;
+  const metrics = selectedMetrics(detail);
 
   return (
     <article className={styles.attemptDetail} aria-live="polite">
@@ -185,23 +227,53 @@ function AttemptDetail({
 
       {/* Metric cells preserve the selection even before aggregate values are available. */}
       <div className={styles.aggregateGrid}>
-        {selectedMetrics.map((metric) => (
+        {metrics.map((metric) => (
           <div key={metric}>
-            <span>{metricLabel(metric, topK)}</span>
-            <strong>{metricValue(metric, detail.aggregates[metric] ?? null)}</strong>
+            <span>{evaluationMetricLabel(metric, topK)}</span>
+            <strong>{evaluationMetricValue(metric, detail.aggregates[metric] ?? null)}</strong>
+            {detail.coverage[metric] ? (
+              <small className={styles.coverageCounts}>
+                {detail.coverage[metric].eligible} eligible · {detail.coverage[metric].scored}
+                {" "}scored · {detail.coverage[metric].skipped} skipped ·
+                {" "}{detail.coverage[metric].error} errors
+              </small>
+            ) : null}
           </div>
         ))}
       </div>
 
       {/* Coverage and failure copy explain whether aggregates represent every question. */}
       {detail.status === "completed" ? (
-        <div className={styles.coverage}>
-          <FiTarget aria-hidden="true" />
-          <span>
-            <strong>{detail.eligible_count ?? 0}</strong> eligible of{" "}
-            <strong>{detail.total_count ?? 0}</strong> questions
-          </span>
-        </div>
+        <>
+          {detail.has_errors ? (
+            <div className={styles.partialWarning} role="alert">
+              <FiAlertCircle aria-hidden="true" />
+              <span>Partial results: one or more LLM judge requests failed.</span>
+            </div>
+          ) : null}
+          {detail.configuration.evaluator ? (
+            <details className={styles.evaluatorDetails}>
+              <summary>LLM judge configuration</summary>
+              <dl>
+                <div><dt>Evaluator</dt><dd>
+                  {detail.configuration.evaluator.provider} /
+                  {" "}{detail.configuration.evaluator.model}
+                </dd></div>
+                <div><dt>Prompt</dt><dd>
+                  {detail.configuration.evaluator.prompt_version}
+                </dd></div>
+                <div><dt>Rubric</dt><dd>
+                  {detail.configuration.evaluator.rubric_version}
+                </dd></div>
+                <div><dt>Fixed settings</dt><dd>
+                  Temperature {detail.configuration.evaluator.temperature} ·
+                  {" "}{detail.configuration.evaluator.reasoning_effort} reasoning ·
+                  {" "}{detail.configuration.evaluator.structured_output}
+                </dd></div>
+              </dl>
+            </details>
+          ) : null}
+        </>
       ) : detail.status === "failed" ? (
         <div className={styles.attemptFailure} role="alert">
           <FiAlertCircle aria-hidden="true" />
@@ -223,25 +295,39 @@ function AttemptDetail({
  * @param props - Evaluation state, run lifecycle, saved metric defaults, and retrieval cutoff.
  * @returns The complete evaluation history and reevaluation workspace.
  */
-export function RetrievalEvaluationWorkspace({
+export function EvaluationWorkspace({
   state,
   runStatus,
-  savedMetrics,
+  savedRetrievalMetrics,
+  savedAnswerMetrics,
   topK,
 }: {
-  state: RetrievalEvaluationsState;
+  state: EvaluationsState;
   runStatus: "pending" | "running" | "completed" | "failed";
-  savedMetrics: string[];
+  savedRetrievalMetrics: string[];
+  savedAnswerMetrics: string[];
   topK: number;
 }) {
   // The form opens only when the user asks to create another durable attempt.
   const [formOpen, setFormOpen] = useState(false);
 
   // Only backend-supported retrieval identifiers may be submitted from saved configuration.
-  const defaultMetrics = RETRIEVAL_METRICS.filter((metric) => savedMetrics.includes(metric));
+  const defaultRetrievalMetrics = RETRIEVAL_METRICS.filter((metric) =>
+    savedRetrievalMetrics.includes(metric)
+  );
+
+  // Saved answer selections initialize every manual re-evaluation form.
+  const defaultAnswerMetrics = ANSWER_METRICS.filter((metric) =>
+    savedAnswerMetrics.includes(metric)
+  );
 
   // Metric selection resets from the immutable run snapshot whenever the form opens.
-  const [selectedMetrics, setSelectedMetrics] = useState<RetrievalMetric[]>(defaultMetrics);
+  const [selectedRetrievalMetrics, setSelectedRetrievalMetrics] =
+    useState<RetrievalMetric[]>(defaultRetrievalMetrics);
+
+  // Answer choices remain independent because they invoke the configured LLM judge.
+  const [selectedAnswerMetrics, setSelectedAnswerMetrics] =
+    useState<AnswerMetric[]>(defaultAnswerMetrics);
 
   const hasActiveAttempt = state.attempts.some((attempt) =>
     attempt.status === "pending" || attempt.status === "running"
@@ -259,10 +345,19 @@ export function RetrievalEvaluationWorkspace({
    * @param checked - Whether the metric should remain selected.
    * @returns Nothing; local form state receives the ordered selection.
    */
-  function toggleMetric(metric: RetrievalMetric, checked: boolean): void {
-    setSelectedMetrics(
+  function toggleRetrievalMetric(metric: RetrievalMetric, checked: boolean): void {
+    setSelectedRetrievalMetrics(
       RETRIEVAL_METRICS.filter((candidate) =>
-        candidate === metric ? checked : selectedMetrics.includes(candidate)
+        candidate === metric ? checked : selectedRetrievalMetrics.includes(candidate)
+      ),
+    );
+  }
+
+  /** Add or remove one LLM-judged metric while retaining stable display order. */
+  function toggleAnswerMetric(metric: AnswerMetric, checked: boolean): void {
+    setSelectedAnswerMetrics(
+      ANSWER_METRICS.filter((candidate) =>
+        candidate === metric ? checked : selectedAnswerMetrics.includes(candidate)
       ),
     );
   }
@@ -276,7 +371,8 @@ export function RetrievalEvaluationWorkspace({
     setFormOpen((current) => {
       // Each new opening starts from the immutable run configuration.
       if (!current) {
-        setSelectedMetrics(defaultMetrics);
+        setSelectedRetrievalMetrics(defaultRetrievalMetrics);
+        setSelectedAnswerMetrics(defaultAnswerMetrics);
       }
 
       return !current;
@@ -290,11 +386,17 @@ export function RetrievalEvaluationWorkspace({
    */
   async function submitEvaluation(): Promise<void> {
     // The interface rejects an empty attempt even though no provider call would occur.
-    if (selectedMetrics.length === 0 || hasActiveAttempt) {
+    if (
+      selectedRetrievalMetrics.length + selectedAnswerMetrics.length === 0
+      || hasActiveAttempt
+    ) {
       return;
     }
 
-    const created = await state.evaluate(selectedMetrics);
+    const created = await state.evaluate(
+      selectedRetrievalMetrics,
+      selectedAnswerMetrics,
+    );
 
     // Keep a failed form open so its structured error remains actionable.
     if (created !== null) {
@@ -307,10 +409,10 @@ export function RetrievalEvaluationWorkspace({
       {/* Evaluation has one primary action and explains its saved-input boundary. */}
       <header className={styles.workspaceHead}>
         <div>
-          <span className={styles.eyebrow}>Saved retrieval scoring</span>
+          <span className={styles.eyebrow}>Saved-result scoring</span>
           <h2 id="evaluation-results-heading">Evaluation results</h2>
           <p>
-            Score the saved top {topK} chunk ranking without rerunning retrieval or generation.
+            Score saved retrieval ranks and generated answers without rerunning the pipeline.
           </p>
         </div>
         <button
@@ -333,11 +435,33 @@ export function RetrievalEvaluationWorkspace({
               {RETRIEVAL_METRICS.map((metric) => (
                 <label key={metric}>
                   <input
-                    checked={selectedMetrics.includes(metric)}
-                    onChange={(event) => toggleMetric(metric, event.target.checked)}
+                    checked={selectedRetrievalMetrics.includes(metric)}
+                    onChange={(event) =>
+                      toggleRetrievalMetric(metric, event.target.checked)
+                    }
                     type="checkbox"
                   />
                   <span>{metricLabel(metric, topK)}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>LLM-judged answer metrics</legend>
+            <p className={styles.judgeNote}>
+              These scores are model judgments, not objective measurements.
+            </p>
+            <div className={styles.metricChoices}>
+              {ANSWER_METRICS.map((metric) => (
+                <label key={metric}>
+                  <input
+                    checked={selectedAnswerMetrics.includes(metric)}
+                    onChange={(event) =>
+                      toggleAnswerMetric(metric, event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>{evaluationMetricLabel(metric, topK)}</span>
                 </label>
               ))}
             </div>
@@ -349,7 +473,7 @@ export function RetrievalEvaluationWorkspace({
             <button
               className={styles.primaryAction}
               disabled={
-                selectedMetrics.length === 0
+                selectedRetrievalMetrics.length + selectedAnswerMetrics.length === 0
                 || state.creating
                 || hasActiveAttempt
               }
@@ -359,8 +483,8 @@ export function RetrievalEvaluationWorkspace({
               {state.creating ? "Queueing…" : "Run evaluation"}
             </button>
           </div>
-          {selectedMetrics.length === 0 ? (
-            <p className={styles.formError}>Select at least one retrieval metric.</p>
+          {selectedRetrievalMetrics.length + selectedAnswerMetrics.length === 0 ? (
+            <p className={styles.formError}>Select at least one evaluation metric.</p>
           ) : null}
           {state.createError ? (
             <p className={styles.formError} role="alert">{state.createError}</p>
@@ -387,7 +511,7 @@ export function RetrievalEvaluationWorkspace({
           <FiTarget aria-hidden="true" />
           <div>
             <strong>No evaluation attempts</strong>
-            <p>Run an evaluation to score the benchmark&apos;s saved retrieval results.</p>
+            <p>Score saved retrieval results, generated answers, or both.</p>
           </div>
         </div>
       ) : (
@@ -407,8 +531,8 @@ export function RetrievalEvaluationWorkspace({
                 </span>
                 <strong>{evaluationTime(attempt.created_at)}</strong>
                 <small>
-                  {attempt.configuration.retrieval_metrics
-                    .map((metric) => metricLabel(metric, topK))
+                  {selectedMetrics(attempt)
+                    .map((metric) => evaluationMetricLabel(metric, topK))
                     .join(" · ")}
                 </small>
                 <span className={styles.attemptStatus}>
@@ -471,7 +595,7 @@ export function QuestionEvaluationPanel({
       <header className={styles.questionPanelHead}>
         <div>
           <span className={styles.eyebrow}>Selected evaluation attempt</span>
-          <h2 id="question-evaluation-heading">Retrieval evaluation</h2>
+          <h2 id="question-evaluation-heading">Question evaluation</h2>
         </div>
         {evaluation ? (
           <span className={styles.statusBadge} data-status={evaluation.status}>
@@ -491,23 +615,97 @@ export function QuestionEvaluationPanel({
         </p>
       ) : outcome === null ? (
         <p className={styles.questionMessage}>No saved result exists for this question.</p>
-      ) : outcome.skip_reason !== null ? (
-        <p className={styles.questionMessage}>
-          Excluded from aggregates because this question has no resolved document labels.
-        </p>
       ) : (
         <>
-          {/* Per-question scores use the same order and formatting as aggregate results. */}
-          <div className={styles.questionScores}>
-            {evaluation.configuration.retrieval_metrics.map((metric) => (
-              <div key={metric}>
-                <span>{metricLabel(metric, topK)}</span>
-                <strong>{metricValue(metric, outcome.scores?.[metric] ?? null)}</strong>
+          {/* Retrieval scoring remains independent from generated-answer judgments. */}
+          {evaluation.configuration.retrieval_metrics.length > 0 ? (
+            <div className={styles.metricGroup}>
+              <span className={styles.eyebrow}>Deterministic retrieval metrics</span>
+              {outcome.skip_reason !== null ? (
+                <p className={styles.questionMessage}>
+                  Skipped because this question has no resolved document labels.
+                </p>
+              ) : (
+                <div className={styles.questionScores}>
+                  {evaluation.configuration.retrieval_metrics.map((metric) => (
+                    <div key={metric}>
+                      <span>{metricLabel(metric, topK)}</span>
+                      <strong>{metricValue(metric, outcome.scores?.[metric] ?? null)}</strong>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {/* Judge cards retain the original rubric score, rationale, and failure state. */}
+          {evaluation.configuration.answer_metrics.length > 0 ? (
+            <div className={styles.metricGroup}>
+              <span className={styles.eyebrow}>LLM-judged answer metrics</span>
+              <p className={styles.judgeNote}>
+                These are model judgments under the saved rubric, not objective measurements.
+              </p>
+              <div className={styles.answerResults}>
+                {evaluation.configuration.answer_metrics.map((metric) => {
+                  const result = outcome.answer_scores[metric];
+                  const skip = outcome.answer_skips[metric];
+                  const failed = outcome.answer_error?.metrics.includes(metric) ?? false;
+
+                  return (
+                    <article key={metric}>
+                      <header>
+                        <strong>{evaluationMetricLabel(metric, topK)}</strong>
+                        {result ? (
+                          <span>{result.rubric_score} / 4 ·
+                            {" "}{(result.score * 100).toFixed(1)}%</span>
+                        ) : null}
+                      </header>
+                      {result ? (
+                        <>
+                          <p>{result.rationale}</p>
+                          {metric === "groundedness" && result.evidence_ranks.length > 0 ? (
+                            <small>
+                              Supporting prompt context: {result.evidence_ranks.join(", ")}
+                            </small>
+                          ) : null}
+                        </>
+                      ) : failed ? (
+                        <p className={styles.answerError}>
+                          {outcome.answer_error?.message ?? "The judge request failed."}
+                        </p>
+                      ) : (
+                        <p className={styles.answerSkip}>
+                          {skip === "no_reference_answer"
+                            ? "Skipped: no reference answer was supplied."
+                            : "Skipped: no generated answer was saved."}
+                        </p>
+                      )}
+                    </article>
+                  );
+                })}
               </div>
-            ))}
-          </div>
+              {outcome.judge ? (
+                <details className={styles.judgeProvenance}>
+                  <summary>Question judge provenance</summary>
+                  <dl>
+                    <div><dt>Model</dt><dd>{outcome.judge.provider_model ?? "—"}</dd></div>
+                    <div><dt>Duration</dt><dd>{outcome.judge.duration_ms ?? "—"} ms</dd></div>
+                    <div><dt>Tokens</dt><dd>
+                      {outcome.judge.prompt_tokens ?? "—"} input ·
+                      {" "}{outcome.judge.completion_tokens ?? "—"} output ·
+                      {" "}{outcome.judge.total_tokens ?? "—"} total
+                    </dd></div>
+                    <div><dt>Request ID</dt><dd>
+                      {outcome.judge.provider_request_id ?? "—"}
+                    </dd></div>
+                  </dl>
+                </details>
+              ) : null}
+            </div>
+          ) : null}
 
           {/* Relevant labels state the expected documents independently of retrieved ranks. */}
+          {evaluation.configuration.retrieval_metrics.length > 0 ? (
           <div className={styles.expectedDocuments}>
             <span className={styles.eyebrow}>Relevant document labels</span>
             <div>
@@ -518,8 +716,10 @@ export function QuestionEvaluationPanel({
               ))}
             </div>
           </div>
+          ) : null}
 
           {/* The rank tape deliberately keeps duplicate documents at their chunk positions. */}
+          {evaluation.configuration.retrieval_metrics.length > 0 ? (
           <ol className={styles.rankTape} aria-label="Ranked retrieved document evidence">
             {outcome.ranked_document_ids.map((documentId, index) => {
               const rank = index + 1;
@@ -537,6 +737,7 @@ export function QuestionEvaluationPanel({
               );
             })}
           </ol>
+          ) : null}
         </>
       )}
     </section>

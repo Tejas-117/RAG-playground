@@ -130,3 +130,35 @@ def test_groq_judge_rejects_context_rank_outside_saved_evidence() -> None:
         GroqAnswerJudge(client).judge(_judge_input())
 
     assert error.value.code == "invalid_evaluator_response"
+
+
+def test_groq_judge_discards_evidence_for_non_groundedness_metrics() -> None:
+    """Verify incidental citations do not invalidate non-groundedness judgments.
+
+    Returns:
+        None. The adapter retains groundedness evidence and clears irrelevant citations.
+    """
+    completions = FakeCompletions(
+        {
+            "results": [
+                {
+                    "metric": "groundedness",
+                    "score": 4,
+                    "rationale": "The first context supports the answer.",
+                    "evidence_ranks": [1],
+                },
+                {
+                    "metric": "answer_relevance",
+                    "score": 4,
+                    "rationale": "The answer directly addresses the question.",
+                    "evidence_ranks": [1],
+                },
+            ]
+        }
+    )
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    result = GroqAnswerJudge(client).judge(_judge_input())
+
+    assert result.results["groundedness"]["evidence_ranks"] == [1]
+    assert result.results["answer_relevance"]["evidence_ranks"] == []

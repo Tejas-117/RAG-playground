@@ -2,15 +2,16 @@
 
 import { useEffect, useState } from "react";
 import {
-  createRetrievalEvaluation,
-  getRetrievalEvaluation,
-  listRetrievalEvaluations,
+  createEvaluation,
+  getEvaluation,
+  listEvaluations,
 } from "@/lib/benchmark-run-api";
 import { isAxiosError } from "@/lib/axios";
 import { parseBenchmarkRunApiError } from "@/validation/benchmark-runs";
 import type {
   RetrievalEvaluationDetail,
   RetrievalEvaluationSummary,
+  AnswerMetric,
   RetrievalMetric,
 } from "@/validation/benchmark-runs";
 
@@ -25,7 +26,7 @@ const ACTIVE_REFRESH_MS = 2000;
  * @param latestMarker - Latest attempt identity and status from the parent run snapshot.
  * @returns Evaluation state, selection controls, retry, and the reevaluation action.
  */
-export function useRetrievalEvaluations(
+export function useEvaluations(
   runId: string,
   enabled: boolean,
   latestMarker: string,
@@ -75,7 +76,7 @@ export function useRetrievalEvaluations(
       controller = request;
 
       try {
-        const history = await listRetrievalEvaluations(runId, request.signal);
+        const history = await listEvaluations(runId, request.signal);
 
         // Ignore a response from an obsolete lifecycle.
         if (disposed || request.signal.aborted) {
@@ -91,7 +92,7 @@ export function useRetrievalEvaluations(
           setSelectedId(null);
           setDetail(null);
         } else {
-          const selectedDetail = await getRetrievalEvaluation(
+          const selectedDetail = await getEvaluation(
             runId,
             targetId,
             request.signal,
@@ -160,15 +161,23 @@ export function useRetrievalEvaluations(
   /**
    * Queue a new evaluation and select it immediately.
    *
-   * @param metrics - Nonempty retrieval metric selection for the new attempt.
+   * @param retrievalMetrics - Retrieval metric selection for the new attempt.
+   * @param answerMetrics - Answer metric selection for the new attempt.
    * @returns The created attempt, or null when the request fails.
    */
-  async function evaluate(metrics: RetrievalMetric[]): Promise<RetrievalEvaluationDetail | null> {
+  async function evaluate(
+    retrievalMetrics: RetrievalMetric[],
+    answerMetrics: AnswerMetric[],
+  ): Promise<RetrievalEvaluationDetail | null> {
     setCreating(true);
     setCreateError("");
 
     try {
-      const created = await createRetrievalEvaluation(runId, metrics);
+      const created = await createEvaluation(
+        runId,
+        retrievalMetrics,
+        answerMetrics,
+      );
 
       // Place the new attempt first without waiting for the next history refresh.
       setAttempts((current) => [
@@ -231,4 +240,4 @@ export function useRetrievalEvaluations(
 }
 
 /** Public return shape shared by the evaluation workspace and run-detail page. */
-export type RetrievalEvaluationsState = ReturnType<typeof useRetrievalEvaluations>;
+export type EvaluationsState = ReturnType<typeof useEvaluations>;

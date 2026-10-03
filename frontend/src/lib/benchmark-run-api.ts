@@ -9,6 +9,7 @@ import {
   parseRetrievalEvaluations,
   type BenchmarkRunDetail,
   type BenchmarkRunSummary,
+  type AnswerMetric,
   type RetrievalEvaluationDetail,
   type RetrievalEvaluationSummary,
   type RetrievalMetric,
@@ -45,13 +46,13 @@ export async function createBenchmarkRun(
 }
 
 /**
- * List durable retrieval evaluation attempts for one benchmark.
+ * List durable evaluation attempts for one benchmark.
  *
  * @param runId - Stable completed or active benchmark identifier.
  * @param signal - Optional request cancellation signal.
  * @returns Validated evaluation summaries ordered newest first.
  */
-export async function listRetrievalEvaluations(
+export async function listEvaluations(
   runId: string,
   signal?: AbortSignal,
 ): Promise<RetrievalEvaluationSummary[]> {
@@ -63,14 +64,14 @@ export async function listRetrievalEvaluations(
 }
 
 /**
- * Read one retrieval evaluation with its saved question-level evidence.
+ * Read one evaluation with its saved question-level evidence.
  *
  * @param runId - Stable parent benchmark identifier.
  * @param evaluationId - Stable evaluation attempt identifier.
  * @param signal - Optional request cancellation signal.
  * @returns The validated evaluation detail.
  */
-export async function getRetrievalEvaluation(
+export async function getEvaluation(
   runId: string,
   evaluationId: string,
   signal?: AbortSignal,
@@ -85,22 +86,26 @@ export async function getRetrievalEvaluation(
 }
 
 /**
- * Queue independent scoring of a completed benchmark's saved retrieval results.
+ * Queue independent scoring of a completed benchmark's saved results.
  *
  * @param runId - Stable completed benchmark identifier.
  * @param metrics - Retrieval metrics selected for the new attempt.
  * @param signal - Optional request cancellation signal.
  * @returns The validated pending evaluation attempt.
  */
-export async function createRetrievalEvaluation(
+export async function createEvaluation(
   runId: string,
-  metrics: RetrievalMetric[],
+  retrievalMetrics: RetrievalMetric[],
+  answerMetrics: AnswerMetric[],
   signal?: AbortSignal,
 ): Promise<RetrievalEvaluationDetail> {
   const encodedRunId = encodeURIComponent(runId);
   const response = await apiClient.post<unknown>(
     `/runs/${encodedRunId}/evaluations`,
-    { retrieval_metrics: metrics },
+    {
+      retrieval_metrics: retrievalMetrics,
+      answer_metrics: answerMetrics,
+    },
     { signal },
   );
   return parseRetrievalEvaluationDetail(response.data);

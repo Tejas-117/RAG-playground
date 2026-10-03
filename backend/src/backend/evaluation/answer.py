@@ -134,17 +134,11 @@ class GroqAnswerJudge:
         request = self._request_arguments(judge_input)
         started_at = perf_counter()
 
-        print('************************** REQUEST **********************************')
-        print(request)
-
         try:
             # The worker invokes this synchronous SDK request outside DB transactions.
             response = (self._client or self._create_client()).chat.completions.create(
                 **request
             )
-
-            print('************************** RESPONSE **********************************')
-            print(response)
         except (groq.AuthenticationError, groq.PermissionDeniedError) as error:
             raise AnswerJudgeError(
                 "evaluator_authentication_failed",
@@ -213,10 +207,12 @@ class GroqAnswerJudge:
                 "the supplied context. Return supporting one-based context ranks."
             ),
             "answer_relevance": (
-                "Score whether the answer directly and sufficiently addresses the question."
+                "Score whether the answer directly and sufficiently addresses the question. "
+                "Return an empty evidence_ranks array."
             ),
             "answer_correctness": (
-                "Score factual agreement with the supplied reference answer."
+                "Score factual agreement with the supplied reference answer. Return an "
+                "empty evidence_ranks array."
             ),
         }
         payload = {
@@ -341,14 +337,18 @@ class GroqAnswerJudge:
             evidence_ranks = (
                 item.get("evidence_ranks") if isinstance(item, dict) else None
             )
-            valid_ranks = isinstance(evidence_ranks, list) and all(
-                isinstance(rank, int)
-                and not isinstance(rank, bool)
-                and 1 <= rank <= len(judge_input.context_chunks)
-                for rank in evidence_ranks
+            is_groundedness = metric == "groundedness"
+            valid_ranks = isinstance(evidence_ranks, list) and (
+                not is_groundedness
+                or all(
+                    isinstance(rank, int)
+                    and not isinstance(rank, bool)
+                    and 1 <= rank <= len(judge_input.context_chunks)
+                    for rank in evidence_ranks
+                )
             )
 
-            # Reject duplicates, missing metrics, invalid rubric scores, and bad citations.
+            # Reject duplicates, missing metrics, invalid scores, and groundedness citations.
             if (
                 metric not in judge_input.metrics
                 or metric in results
@@ -359,18 +359,19 @@ class GroqAnswerJudge:
                 or not rationale.strip()
                 or len(rationale) > MAX_RATIONALE_CHARACTERS
                 or not valid_ranks
-                or (metric != "groundedness" and evidence_ranks)
             ):
                 raise AnswerJudgeError(
                     "invalid_evaluator_response",
                     "The answer evaluator returned invalid metric evidence.",
                 )
 
+            # Provider-added citations are discarded for metrics without evidence semantics.
+            normalized_evidence_ranks = evidence_ranks if is_groundedness else []
             results[metric] = {
                 "rubric_score": score,
                 "score": score / 4,
                 "rationale": rationale.strip(),
-                "evidence_ranks": evidence_ranks,
+                "evidence_ranks": normalized_evidence_ranks,
             }
 
         # One response must contain exactly one judgment for every requested metric.

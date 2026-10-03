@@ -93,6 +93,17 @@
   text-transform: uppercase;
 }
 
+.evaluationForm fieldset + fieldset {
+  margin-top: 18px;
+}
+
+.judgeNote {
+  margin: -3px 0 10px;
+  color: var(--tone-black);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .metricChoices {
   display: grid;
   gap: 8px;
@@ -322,6 +333,12 @@
   font-weight: 650;
 }
 
+.coverageCounts {
+  color: var(--tone-black);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
 .coverage,
 .activeMessage,
 .attemptFailure {
@@ -329,6 +346,54 @@
   padding: 11px 12px;
   background: var(--panel-surface);
   font-size: 12px;
+}
+
+.partialWarning {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 16px;
+  padding: 11px 12px;
+  border: 1px solid var(--toast-error-border);
+  background: var(--toast-error-surface);
+  color: var(--toast-error-text);
+  font-size: 12px;
+}
+
+.evaluatorDetails,
+.judgeProvenance {
+  margin-top: 16px;
+  color: var(--tone-black);
+  font-size: 11px;
+}
+
+.evaluatorDetails summary,
+.judgeProvenance summary {
+  width: fit-content;
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.evaluatorDetails dl,
+.judgeProvenance dl {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 12px;
+  background: var(--page-surface);
+}
+
+.evaluatorDetails dl div,
+.judgeProvenance dl div {
+  display: grid;
+  grid-template-columns: minmax(90px, .35fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.evaluatorDetails dd,
+.judgeProvenance dd {
+  color: var(--charcoal);
+  overflow-wrap: anywhere;
 }
 
 .attemptFailure {
@@ -422,6 +487,69 @@
   color: var(--tone-black);
   font-size: 12px;
   line-height: 1.55;
+}
+
+.metricGroup + .metricGroup {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.metricGroup > .questionScores {
+  margin-top: 9px;
+}
+
+.metricGroup > .judgeNote {
+  margin: 7px 0 10px;
+}
+
+.answerResults {
+  display: grid;
+  gap: 8px;
+}
+
+.answerResults article {
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  background: var(--page-surface);
+}
+
+.answerResults header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.answerResults header strong {
+  font-size: 12px;
+}
+
+.answerResults header span {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.answerResults p {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.answerResults small {
+  display: block;
+  margin-top: 8px;
+  color: var(--tone-black);
+  font-size: 10px;
+}
+
+.answerResults .answerError {
+  color: var(--toast-error-text);
+}
+
+.answerResults .answerSkip {
+  color: var(--tone-black);
 }
 
 .expectedDocuments {
